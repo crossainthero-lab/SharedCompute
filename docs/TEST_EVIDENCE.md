@@ -8,10 +8,11 @@ No second network was available. Nothing below claims otherwise.
 
 | Claim | Status | Evidence |
 |---|---|---|
-| Marketplace, scheduler, ledger, UI work | **Verified** on the Mac | 213 automated tests; browser walkthroughs on the Mac |
+| Marketplace, scheduler, ledger, UI work | **Verified** on the Mac | 219 automated tests; browser walkthroughs on the Mac |
 | Agent discovers real hardware | **Verified on macOS only** | `diagnose` and `run` on the Mac: Intel UHD 630, Radeon Pro 5300M, i7-9750H |
 | Agent refuses non-NVIDIA / unselected GPUs | **Verified** on the Mac | Real run: `--gpu 1` on the AMD GPU was refused ("not an NVIDIA GPU") |
-| Real job executed by the agent, verified, billed | **Verified, CPU workload** | Real agent on the Mac ran `agent.hashchain` jobs (v0.2 job #1, v0.3 job #5), server recomputed the digest, settled 1¢ |
+| Real job executed by the agent, verified, billed | **Verified, CPU workload** | Real agent on the Mac ran `agent.hashchain` jobs (v0.2 job #1, v0.3 job #5), server recomputed the digest, settled 1¢. Repeatable as `scripts/smoke_local.py` (Runbook Test 1: PASS) |
+| Setup scripts | **Verified** on the Mac | `bootstrap-dev.sh` and `bootstrap-agent.sh` (twice each: idempotent), `doctor.sh` (read-only), from a fresh GitHub clone |
 | v0.2 → v0.3 database migration | **Verified** on real data | The v0.2 UI-test database was migrated in place; listings and history kept |
 | TLS between agent and server | **Verified on loopback** | Automated test: uvicorn with a certificate from `scripts/make-dev-tls.sh`, agent with `--ca-file`; untrusted certificate refused |
 | Agent runs on Python 3.8 with no dependencies | **Verified** on the Mac | `pip install ./agent` into a Python 3.8.20 venv; 64 agent tests passed (1 optional skip) |
@@ -22,9 +23,9 @@ No second network was available. Nothing below claims otherwise.
 | Agents across two separate networks | **Not tested** | Only loopback was available |
 | Windows (`nvcuda.dll`) | **Not tested** | Code path exists; never exercised |
 
-## Automated tests (213)
+## Automated tests (219)
 
-Run with `pytest` from the repository root. On 2026-10-12: 213 passed on Python 3.12 (with `llvmlite` installed); 212 passed + 1 skipped (PTX regeneration, no `llvmlite`) on Python 3.14.
+Run with `pytest` from the repository root. On 2026-10-12: 219 passed on Python 3.12 (with `llvmlite` installed). Without `llvmlite` (e.g. Python 3.14, or a fresh clone) expect 218 passed + 1 skipped: the skipped test regenerates the PTX and says nothing about hardware.
 
 | File | Tests | Real | Stubbed / simulated |
 |---|---:|---|---|
@@ -35,13 +36,13 @@ Run with `pytest` from the repository root. On 2026-10-12: 213 passed on Python 
 | `tests/test_v01_parity.py` | 6 | v0.1 draft scenarios on the v0.3 API | simulated workloads |
 | `tests/test_agent_protocol.py` | 37 | Opt-in, compatibility, graceful rejection, evidence levels, tampered/forged results, leases, tokens | agent requests are crafted by the test (no real hardware); GPU outputs computed on the CPU |
 | `tests/test_workloads.py` | 14 | Server/agent agreement: LCG, checksum, Merkle, challenges, requirements | none |
-| `tests/test_migrations_and_deploy.py` | 12 | v0.2→v0.3 migration, bind policy, closed registration, Secure cookies, `add-user` | none |
+| `tests/test_migrations_and_deploy.py` | 15 | v0.2→v0.3 migration, bind policy, closed registration, Secure cookies, `add-user` | none |
 | `tests/test_api.py` | 8 | Error shapes, limits, headers, static files | none |
 | `tests/test_e2e_agent.py` | 7 | Real uvicorn sockets, real agent loop and client, real TLS with a private CA, backoff, 401 handling | device detection stubbed; GPU tests use the fake driver |
 | `agent/tests/test_gpu_detection.py` | 17 | Parsing, PCI matching, fallback order, CPU device | synthetic nvidia-smi output; fake pynvml; macOS fixture **recorded on the real Mac** |
 | `agent/tests/test_cuda_driver.py` | 13 | ctypes marshalling, memory cleanup, JIT log capture, legacy entry points, OOM, cancellation | fake libcuda |
 | `agent/tests/test_policy_and_workloads.py` | 15 | Opt-in rules, display-GPU guard, compatibility, CPU fallback labelling, Merkle | fake libcuda |
-| `agent/tests/test_cli_and_client.py` | 20 | HTTPS enforcement, TLS settings, token-file permissions, diagnose/self-test logic, PTX header, PTX reproducibility | fake libcuda; PTX regeneration needs `llvmlite==0.43.0` (skipped otherwise) |
+| `agent/tests/test_cli_and_client.py` | 23 | HTTPS enforcement, TLS settings, token-file permissions, diagnose/self-test logic, PTX header, PTX reproducibility | fake libcuda; PTX regeneration needs `llvmlite==0.43.0` (skipped otherwise) |
 
 ## Manual runs on the Mac (2026-10-12)
 

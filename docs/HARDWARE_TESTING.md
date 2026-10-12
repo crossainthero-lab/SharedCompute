@@ -38,6 +38,9 @@ If `nvidia-smi` is missing, install the proprietary driver (Ubuntu: `sudo ubuntu
 
 ## 3. Install the agent only
 
+Shortcut: `scripts/bootstrap-agent.sh` does this and step 4 safely (isolated venv, config that offers nothing,
+read-only diagnostics). The manual equivalent:
+
 The agent has no third-party dependencies. Copy this repository (or just the `agent/` folder) to the machine:
 
 ```bash

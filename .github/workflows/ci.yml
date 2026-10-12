@@ -50,6 +50,30 @@ jobs:
       - run: pip install "llvmlite==0.43.0"
       - run: python agent/kernels/build_ptx.py --check
 
+  bootstrap:
+    # What a new machine experiences: the setup scripts from a clean checkout, then the real agent end to end.
+    name: Bootstrap + smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: bash -n scripts/bootstrap-dev.sh && bash -n scripts/bootstrap-agent.sh && bash -n scripts/doctor.sh
+      - run: scripts/bootstrap-dev.sh --skip-tests
+      - run: .venv/bin/python scripts/smoke_local.py --report smoke.json
+      - run: scripts/bootstrap-agent.sh --venv "$RUNNER_TEMP/agent-venv" --config-dir "$RUNNER_TEMP/sc-config"
+      - run: scripts/doctor.sh --agent-venv "$RUNNER_TEMP/agent-venv" --config-dir "$RUNNER_TEMP/sc-config"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.os }}
+          path: smoke.json
+
   secrets:
     name: No secrets or local data committed
     runs-on: ubuntu-latest
