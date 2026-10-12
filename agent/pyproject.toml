@@ -1,7 +1,7 @@
 # Provider-only install: `pip install ./agent` on the GPU machine. No third-party dependencies;
 # needs only Python 3.8+ and, for GPU work, the NVIDIA driver (no CUDA toolkit, no PyTorch).
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=64"]  # 64+ for editable installs
 build-backend = "setuptools.build_meta"
 
 [project]

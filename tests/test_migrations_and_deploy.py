@@ -120,3 +120,40 @@ def test_add_user_cli_works_when_registration_is_closed(tmp_path, monkeypatch, c
     assert client.get("/api/v1/marketplace").status_code == 200
     monkeypatch.setattr("sys.stdin", io.StringIO("short\n"))
     assert server_cli.main(["add-user", "bad@example.com", "--name", "Bad", "--password-stdin"]) == 1
+
+
+def test_server_env_file_and_relative_db(tmp_path, monkeypatch):
+    from sharedcompute import config
+    env = tmp_path / "server.env"
+    env.write_text("SHAREDCOMPUTE_DB=data/x.sqlite3\nSHAREDCOMPUTE_PLATFORM_FEE_BPS=750\n")
+    monkeypatch.setenv("SHAREDCOMPUTE_ENV_FILE", str(env))
+    monkeypatch.delenv("SHAREDCOMPUTE_DB", raising=False)
+    monkeypatch.delenv("SHAREDCOMPUTE_PLATFORM_FEE_BPS", raising=False)
+    assert config.load_env_file() == ["SHAREDCOMPUTE_DB", "SHAREDCOMPUTE_PLATFORM_FEE_BPS"]
+    s = Settings.from_env()
+    assert s.db_path == config.ROOT / "data" / "x.sqlite3" and s.platform_fee_bps == 750
+
+
+def test_shipped_server_template_is_safe():
+    from sharedcompute import config
+    env = {}
+    from sharedcompute_agent.envfile import load_env_file
+    load_env_file(config.ROOT / ".env.example", env)
+    assert env["SHAREDCOMPUTE_DB"] == "data/sharedcompute.sqlite3"
+    assert "SHAREDCOMPUTE_REGISTRATION" not in env  # exposure settings stay commented out
+
+
+def test_migrate_command_backs_up_before_upgrading(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "data" / "sc.sqlite3"
+    Database(path).migrate(target=1)
+    monkeypatch.setenv("SHAREDCOMPUTE_DB", str(path))
+    assert server_cli.main(["migrate", "--check"]) == 1
+    assert server_cli.main(["migrate"]) == 0
+    out = capsys.readouterr().out
+    backups = list((tmp_path / "data" / "backups").glob("sc.v1.*.sqlite3"))
+    assert len(backups) == 1 and "Backed up" in out
+    with sqlite3.connect(backups[0]) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1  # the backup is the old version
+    assert server_cli.main(["migrate", "--check"]) == 0
+    assert server_cli.main(["migrate"]) == 0 and "Up to date" in capsys.readouterr().out
+    assert len(list((tmp_path / "data" / "backups").iterdir())) == 1  # no backup when nothing changes

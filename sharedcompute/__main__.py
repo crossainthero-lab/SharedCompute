@@ -6,7 +6,7 @@ import getpass
 import os
 import sys
 
-from .config import Settings
+from .config import Settings, env_file_path, load_env_file
 from .db import Database
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -47,6 +47,39 @@ def apply_bind_policy(settings: Settings, host: str, *, tls: bool, behind_proxy:
     return notes
 
 
+def migrate_command(settings: Settings, *, check: bool, quiet: bool = False) -> int:
+    """Report the schema version; when upgrading an existing database, copy it to data/backups first."""
+    import shutil
+    import sqlite3
+    import time
+
+    from .db import SCHEMA_VERSION
+
+    path = settings.db_path
+    current = 0
+    if path.exists():
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if not quiet:
+        print(f"Database: {path}")
+        print(f"Schema: {current if path.exists() else 'not created'} (this build: {SCHEMA_VERSION})")
+    if check:
+        return 0 if current == SCHEMA_VERSION else 1
+    if path.exists() and current < SCHEMA_VERSION:
+        backup = path.parent / "backups" / f"{path.stem}.v{current}.{time.strftime('%Y%m%d-%H%M%S')}{path.suffix}"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as src, sqlite3.connect(backup) as dst:
+            src.backup(dst)  # consistent copy even with WAL
+            dst.execute("PRAGMA journal_mode = DELETE")  # a single self-contained file
+        print(f"Backed up to {backup}")
+    applied = Database(path).migrate()
+    if applied:
+        print(f"Applied migrations: {', '.join(map(str, applied))} to {path}")
+    elif not quiet:
+        print("Up to date.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sharedcompute")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -65,11 +98,17 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument("--operator", action="store_true")
     add.add_argument("--password-stdin", action="store_true", help="Read the password from standard input")
 
+    mig = sub.add_parser("migrate", help="Create or upgrade the database (backs up first if it changes)")
+    mig.add_argument("--check", action="store_true", help="Only report the schema version; change nothing")
+
     op = sub.add_parser("make-operator", help="Grant operator access (platform economics) to an account")
     op.add_argument("email")
     op.add_argument("--revoke", action="store_true")
 
     args = parser.parse_args(argv)
+    loaded = load_env_file()
+    if loaded and args.command == "serve":
+        print(f"Loaded {len(loaded)} setting(s) from {env_file_path()}")
     settings = Settings.from_env()
 
     if args.command == "serve":
@@ -85,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
 
         from .api import create_app
 
+        if migrate_command(settings, check=False, quiet=True) != 0:  # backs up before any upgrade
+            return 1
+
         scheme = "https" if args.tls_cert else "http"
         print(f"SharedCompute {settings.db_path} -> {scheme}://{args.host}:{args.port}")
         for note in notes:
@@ -97,6 +139,9 @@ def main(argv: list[str] | None = None) -> int:
                            forwarded_allow_ips=os.environ.get("SHAREDCOMPUTE_TRUSTED_PROXIES", "127.0.0.1"))
         uvicorn.run(create_app(settings), host=args.host, port=args.port, log_level="info", **options)
         return 0
+
+    if args.command == "migrate":
+        return migrate_command(settings, check=args.check)
 
     from .errors import DomainError
     from .services import accounts

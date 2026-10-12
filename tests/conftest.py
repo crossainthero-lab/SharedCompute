@@ -26,6 +26,13 @@ class FakeClock:
         self.now += seconds
 
 
+@pytest.fixture(autouse=True)
+def _no_machine_config(monkeypatch, tmp_path):
+    """Never read the developer's real .env or agent.env during tests."""
+    monkeypatch.setenv("SHAREDCOMPUTE_ENV_FILE", str(tmp_path / "no.env"))
+    monkeypatch.setenv("SHAREDCOMPUTE_AGENT_ENV", str(tmp_path / "no-agent.env"))
+
+
 @pytest.fixture
 def clock():
     return FakeClock()

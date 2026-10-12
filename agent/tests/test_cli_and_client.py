@@ -17,6 +17,15 @@ from sharedcompute_agent.policy import OfferPolicy
 KERNEL = Path(__file__).resolve().parents[1] / "sharedcompute_agent" / "kernels" / "matmul_i32.ptx"
 
 
+@pytest.fixture(autouse=True)
+def _no_machine_config(monkeypatch, tmp_path):
+    """The CLI reads ~/.config/sharedcompute/agent.env; never let a real one leak into tests."""
+    monkeypatch.setenv("SHAREDCOMPUTE_AGENT_ENV", str(tmp_path / "no-agent.env"))
+    for key in ("SHAREDCOMPUTE_GPUS", "SHAREDCOMPUTE_OFFER_CPU", "SHAREDCOMPUTE_TOKEN_FILE", "SHAREDCOMPUTE_NODE_TOKEN",
+                "SHAREDCOMPUTE_ALLOW_DISPLAY_GPU", "SHAREDCOMPUTE_ALLOW_CPU_FALLBACK", "SHAREDCOMPUTE_CA_FILE"):
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8765", "http://localhost:8765", "https://market.example.com",
                                  "https://box.tailnet-1234.ts.net"])
 def test_secure_urls_accepted(url):
@@ -136,3 +145,35 @@ def test_committed_ptx_is_reproducible_from_source():
 def test_agent_versions_agree():
     text = (KERNEL.parents[2] / "pyproject.toml").read_text()
     assert f'version = "{__version__}"' in text
+
+
+def test_env_file_parsing(tmp_path):
+    from sharedcompute_agent.envfile import load_env_file
+    f = tmp_path / "agent.env"
+    f.write_text("# comment\n\nexport SHAREDCOMPUTE_SERVER='https://m.example.com'\nSHAREDCOMPUTE_GPUS=0,1  # two\n"
+                 "SHAREDCOMPUTE_CA_FILE=\nSHAREDCOMPUTE_OFFER_CPU=\"1\"\n")
+    env = {"SHAREDCOMPUTE_GPUS": "3"}  # the real environment wins
+    assert load_env_file(f, env) == ["SHAREDCOMPUTE_SERVER", "SHAREDCOMPUTE_CA_FILE", "SHAREDCOMPUTE_OFFER_CPU"]
+    assert env == {"SHAREDCOMPUTE_GPUS": "3", "SHAREDCOMPUTE_SERVER": "https://m.example.com",
+                   "SHAREDCOMPUTE_CA_FILE": "", "SHAREDCOMPUTE_OFFER_CPU": "1"}
+    assert load_env_file(tmp_path / "missing.env", env) == []
+    (tmp_path / "bad.env").write_text("not a setting\n")
+    with pytest.raises(ValueError, match="bad.env:1"):
+        load_env_file(tmp_path / "bad.env", {})
+
+
+def test_agent_reads_its_config_file(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "agent.env"
+    cfg.write_text("SHAREDCOMPUTE_SERVER=http://203.0.113.9:8765\nSHAREDCOMPUTE_NODE_TOKEN=scn_test\n")
+    monkeypatch.setenv("SHAREDCOMPUTE_AGENT_ENV", str(cfg))
+    monkeypatch.delenv("SHAREDCOMPUTE_SERVER", raising=False)
+    assert cli.main(["run"]) == 2  # server from the file is remote plain HTTP, so it is refused
+    assert "Refusing plain HTTP to 203.0.113.9" in capsys.readouterr().err
+
+
+def test_shipped_agent_template_offers_nothing():
+    from sharedcompute_agent.envfile import load_env_file
+    env = {}
+    load_env_file(KERNEL.parents[2] / "agent.env.example", env)
+    assert env["SHAREDCOMPUTE_GPUS"] == "" and env["SHAREDCOMPUTE_OFFER_CPU"] == "0"
+    assert env["SHAREDCOMPUTE_ALLOW_DISPLAY_GPU"] == "0" and "scn_" not in str(env)

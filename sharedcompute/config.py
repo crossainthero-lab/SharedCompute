@@ -10,6 +10,18 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def env_file_path() -> Path:
+    """Machine-specific settings: $SHAREDCOMPUTE_ENV_FILE, else .env at the repository root (git-ignored)."""
+    return Path(os.environ.get("SHAREDCOMPUTE_ENV_FILE") or ROOT / ".env").expanduser()
+
+
+def load_env_file(path: Path | None = None) -> list[str]:
+    """Load KEY=VALUE settings without overriding the real environment. Returns the keys set."""
+    from sharedcompute_agent.envfile import load_env_file as _load
+
+    return _load(path or env_file_path())
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -70,7 +82,8 @@ class Settings:
     def from_env(cls) -> "Settings":
         s = cls()
         if os.environ.get("SHAREDCOMPUTE_DB"):
-            s.db_path = Path(os.environ["SHAREDCOMPUTE_DB"]).expanduser()
+            db_path = Path(os.environ["SHAREDCOMPUTE_DB"]).expanduser()
+            s.db_path = db_path if db_path.is_absolute() else ROOT / db_path  # relative to the repo, not the cwd
         s.platform_fee_bps = _int("SHAREDCOMPUTE_PLATFORM_FEE_BPS", s.platform_fee_bps)
         s.max_attempts = _int("SHAREDCOMPUTE_MAX_ATTEMPTS", s.max_attempts)
         s.node_ttl_seconds = _float("SHAREDCOMPUTE_NODE_TTL_SECONDS", s.node_ttl_seconds)

@@ -15,6 +15,7 @@ from . import gpu, workloads
 from .agent import Agent
 from .client import ApiError, InsecureServerError, MarketplaceClient
 from .diagnose import diagnose, render
+from .envfile import default_agent_env_path, load_env_file
 from .policy import OfferPolicy
 
 
@@ -32,9 +33,8 @@ def _policy(args) -> OfferPolicy:
     gpus = list(args.gpu or [])
     if not gpus and os.environ.get("SHAREDCOMPUTE_GPUS"):
         gpus = [g for g in os.environ["SHAREDCOMPUTE_GPUS"].split(",") if g.strip()]
-    offer_cpu = args.offer_cpu or os.environ.get("SHAREDCOMPUTE_OFFER_CPU", "").lower() in ("1", "true", "yes")
-    return OfferPolicy(gpus=tuple(g.strip() for g in gpus), offer_cpu=offer_cpu,
-                       allow_display_gpu=args.allow_display_gpu)
+    return OfferPolicy(gpus=tuple(g.strip() for g in gpus), offer_cpu=args.offer_cpu or _flag("SHAREDCOMPUTE_OFFER_CPU"),
+                       allow_display_gpu=args.allow_display_gpu or _flag("SHAREDCOMPUTE_ALLOW_DISPLAY_GPU"))
 
 
 def _offer_flags(p: argparse.ArgumentParser) -> None:
@@ -45,7 +45,18 @@ def _offer_flags(p: argparse.ArgumentParser) -> None:
                    help="Allow offering a GPU that drives a display (off by default to protect your main GPU)")
 
 
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    # Machine-specific settings (server URL, token file, CA, chosen devices) live outside Git.
+    config_path = default_agent_env_path()
+    try:
+        load_env_file(config_path)
+    except ValueError as exc:
+        print(f"ERROR in agent config: {exc}", file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(prog="python -m sharedcompute_agent")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("detect", help="Print detected devices as JSON, then exit")
@@ -58,7 +69,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     run = sub.add_parser("run", help="Connect to the marketplace and serve jobs")
     _offer_flags(run)
     run.add_argument("--server", default=os.environ.get("SHAREDCOMPUTE_SERVER", "http://127.0.0.1:8765"))
-    run.add_argument("--token-file", help="File containing the node token (default: $SHAREDCOMPUTE_NODE_TOKEN)")
+    run.add_argument("--token-file", default=os.environ.get("SHAREDCOMPUTE_TOKEN_FILE"),
+                     help="File containing the node token (or $SHAREDCOMPUTE_TOKEN_FILE / $SHAREDCOMPUTE_NODE_TOKEN)")
     run.add_argument("--ca-file", default=os.environ.get("SHAREDCOMPUTE_CA_FILE"),
                      help="PEM CA bundle to trust for the marketplace (private CA or self-signed pilot server)")
     run.add_argument("--allow-cpu-fallback", action="store_true",
@@ -66,6 +78,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     run.add_argument("--max-jobs", type=int, help="Exit after this many jobs (useful for testing)")
     run.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.command == "diagnose" and not args.json:
+        print(f"Agent config: {config_path}" + ("" if config_path.is_file() else " (not found; using flags and environment only)"))
 
     if args.command == "detect":
         devices = gpu.detect() + [gpu.cpu_device()]
@@ -84,12 +99,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("No node token. Set SHAREDCOMPUTE_NODE_TOKEN or pass --token-file.", file=sys.stderr)
         return 2
     try:
-        client = MarketplaceClient(args.server, token, ca_file=args.ca_file)
+        ca_file = os.path.expanduser(args.ca_file) if args.ca_file else None
+        client = MarketplaceClient(args.server, token, ca_file=ca_file)
     except InsecureServerError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     agent = Agent(client, policy=_policy(args), max_jobs=args.max_jobs,
-                  options=workloads.RunOptions(allow_cpu_fallback=args.allow_cpu_fallback))
+                  options=workloads.RunOptions(allow_cpu_fallback=args.allow_cpu_fallback
+                                               or _flag("SHAREDCOMPUTE_ALLOW_CPU_FALLBACK")))
     signal.signal(signal.SIGTERM, lambda *_: agent.stop.set())
     try:
         agent.run()
