@@ -38,16 +38,22 @@ def submit(conn: sqlite3.Connection, settings: Settings, owner_id: int, body: di
     workload = workloads.get(body.get("workload"))  # type: ignore[arg-type]
     if workload is None:
         raise InvalidInput("Choose a supported workload", field="workload")
-    vram_gb = v.integer(body.get("min_vram_gb"), "min_vram_gb", "Minimum VRAM", 1, 192)
+    vram_gb = v.integer(body.get("min_vram_gb"), "min_vram_gb", "Minimum VRAM", 0, 192)
+    min_cc = body.get("min_compute_capability")
+    if min_cc in (None, ""):
+        min_cc = None
+    elif workloads.parse_cc(min_cc) is None:
+        raise InvalidInput("Compute capability must look like 6.1", field="min_compute_capability")
     minutes = v.integer(body.get("est_minutes"), "est_minutes", "Estimated GPU-minutes", 1, 10_080)
     budget = v.usd(body.get("max_budget_usd"), "max_budget_usd", "Maximum budget")
     region = v.region(body.get("region"), allow_any=True)
     now = settings.now()
     job_id = conn.execute(
         """INSERT INTO jobs(owner_id, name, workload, execution, min_vram_mb, est_minutes,
-                            max_budget_cents, region, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
-        (owner_id, name, workload.id, workload.execution, vram_gb * MB_PER_GB, minutes, budget, region, now),
+                            max_budget_cents, region, min_compute_capability, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (owner_id, name, workload.id, workload.execution, vram_gb * MB_PER_GB, minutes, budget, region, min_cc,
+         now),
     ).lastrowid
     ledger.hold(conn, owner_id, job_id, budget, now)
     event(conn, job_id, "submitted", now, f"Budget {money.fmt(budget)} held")
@@ -72,10 +78,12 @@ def _gpu_summary(conn: sqlite3.Connection, gpu_id: int | None) -> dict | None:
     if gpu_id is None:
         return None
     g = conn.execute(
-        """SELECT g.model, g.vram_mb, g.detection, n.name AS node_name, n.region, n.kind
+        """SELECT g.model, g.vram_mb, g.detection, g.device_type, g.compute_capability, n.name AS node_name,
+                  n.region, n.kind
            FROM gpus g JOIN nodes n ON n.id = g.node_id WHERE g.id = ?""", (gpu_id,)
     ).fetchone()
     return {"model": g["model"], "vram_gb": round(g["vram_mb"] / MB_PER_GB, 1), "node_name": g["node_name"],
+            "device_type": g["device_type"], "compute_capability": g["compute_capability"],
             "region": g["region"], "region_label": regions.label(g["region"]), "node_kind": g["kind"],
             "detection": g["detection"]}
 
@@ -93,6 +101,9 @@ def serialize(conn: sqlite3.Connection, settings: Settings, job: sqlite3.Row, *,
         "cost_cents": job["cost_cents"], "provider_cents": job["provider_cents"],
         "platform_cents": job["platform_cents"], "billed_seconds": job["billed_seconds"],
         "verified": None if job["verified"] is None else bool(job["verified"]),
+        "min_compute_capability": job["min_compute_capability"],
+        "executed_on": job["executed_on"],
+        "evidence": json.loads(job["evidence"]) if job["evidence"] else None,
         "result": json.loads(job["result"]) if job["result"] else None,
         "failure_reason": job["failure_reason"],
         "gpu": _gpu_summary(conn, job["gpu_id"]),
@@ -144,24 +155,35 @@ def _clear_assignment_sql() -> str:
 
 
 def fail(conn: sqlite3.Connection, settings: Settings, job: sqlite3.Row, reason: str, *,
-         node_id: int | None, verified: bool | None = None, result: dict | None = None) -> None:
+         node_id: int | None, verified: bool | None = None, result: dict | None = None,
+         executed_on: str | None = None, evidence: dict | None = None) -> None:
     """Final failure: no charge, the full hold is released."""
     now = settings.now()
     conn.execute(
         """UPDATE jobs SET status = 'failed', failure_reason = ?, finished_at = ?, lease_expires_at = NULL,
-                  verified = ?, result = ? WHERE id = ?""",
+                  verified = ?, result = ?, executed_on = ?, evidence = ? WHERE id = ?""",
         (reason, now, None if verified is None else int(verified),
-         json.dumps(result) if result is not None else None, job["id"]),
+         json.dumps(result) if result is not None else None, executed_on,
+         json.dumps(evidence) if evidence is not None else None, job["id"]),
     )
     ledger.release(conn, job["owner_id"], job["id"], job["max_budget_cents"], now, "Job failed; hold released")
     event(conn, job["id"], "failed", now, reason, node_id=node_id)
 
 
 def end_attempt(conn: sqlite3.Connection, settings: Settings, job: sqlite3.Row, reason: str, *,
-                retryable: bool) -> str:
-    """The current assignment ended without success. Requeue if allowed, otherwise fail."""
+                retryable: bool, count_attempt: bool = True) -> str:
+    """The current assignment ended without success. Requeue if allowed, otherwise fail.
+
+    `count_attempt=False` is for graceful hardware rejection: the device declined before doing any work,
+    so the customer does not lose an attempt and the provider's track record is not marked down.
+    """
     now = settings.now()
     node_id = job["node_id"]
+    if not count_attempt:
+        event(conn, job["id"], "rejected", now, reason, node_id=node_id)
+        conn.execute(f"UPDATE jobs SET status = 'pending', attempts = attempts - 1, {_clear_assignment_sql()} "
+                     "WHERE id = ?", (job["id"],))
+        return "pending"
     if retryable and job["attempts"] < settings.max_attempts:
         event(conn, job["id"], "interrupted", now, reason, node_id=node_id)
         conn.execute(f"UPDATE jobs SET status = 'pending', {_clear_assignment_sql()} WHERE id = ?", (job["id"],))
@@ -174,16 +196,19 @@ def end_attempt(conn: sqlite3.Connection, settings: Settings, job: sqlite3.Row, 
 
 
 def complete(conn: sqlite3.Connection, settings: Settings, job: sqlite3.Row, *, billed_seconds: float,
-             cost_cents: int, result: dict, verified: bool | None) -> None:
+             cost_cents: int, result: dict, verified: bool | None, executed_on: str | None = None,
+             evidence: dict | None = None) -> None:
     now = settings.now()
     cost_cents = min(cost_cents, job["quote_cents"])  # never charge above the accepted quote
     provider_cents, platform_cents = money.split_cents(cost_cents, job["fee_bps"])
     conn.execute(
         """UPDATE jobs SET status = 'completed', finished_at = ?, billed_seconds = ?, cost_cents = ?,
-                  provider_cents = ?, platform_cents = ?, result = ?, verified = ?, lease_expires_at = NULL
+                  provider_cents = ?, platform_cents = ?, result = ?, verified = ?, lease_expires_at = NULL,
+                  executed_on = ?, evidence = ?
            WHERE id = ?""",
         (now, billed_seconds, cost_cents, provider_cents, platform_cents, json.dumps(result),
-         None if verified is None else int(verified), job["id"]),
+         None if verified is None else int(verified), executed_on,
+         json.dumps(evidence) if evidence is not None else None, job["id"]),
     )
     ledger.charge(conn, customer_id=job["owner_id"], provider_id=job["provider_id"], job_id=job["id"],
                   held_cents=job["max_budget_cents"], cost_cents=cost_cents, provider_cents=provider_cents,
@@ -242,7 +267,7 @@ def finish_simulated(conn: sqlite3.Connection, settings: Settings, job: sqlite3.
     if job["status"] == "assigned":
         event(conn, job["id"], "started", settings.now(), "Simulated execution started", node_id=job["node_id"])
     complete(conn, settings, job, billed_seconds=job["est_minutes"] * 60, cost_cents=job["quote_cents"],
-             result=simulated_result(), verified=None)
+             result=simulated_result(), verified=None, evidence={"level": "simulated"})
 
 
 def provider_jobs(conn: sqlite3.Connection, provider_id: int, limit: int = 100) -> list[dict]:
@@ -255,6 +280,7 @@ def provider_jobs(conn: sqlite3.Connection, provider_id: int, limit: int = 100) 
     ):
         w = workloads.get(j["workload"])
         out.append({"id": j["id"], "workload_label": w.label if w else j["workload"], "execution": j["execution"],
+                    "executed_on": j["executed_on"],
                     "status": j["status"], "gpu_model": j["model"], "node_name": j["node_name"],
                     "billed_seconds": j["billed_seconds"], "cost_cents": j["cost_cents"],
                     "provider_cents": j["provider_cents"], "started_at": j["started_at"],

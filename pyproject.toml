@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sharedcompute"
-version = "0.2.0"
+version = "0.3.0"
 description = "SharedCompute: a marketplace that matches AI compute jobs to independently owned GPUs."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,9 +28,10 @@ where = [".", "agent"]
 include = ["sharedcompute*", "sharedcompute_agent*"]
 
 [tool.setuptools.package-data]
-sharedcompute = ["schema.sql", "web/*", "web/**/*"]
+sharedcompute = ["migrations/*.sql", "web/*", "web/**/*"]
+sharedcompute_agent = ["kernels/*.ptx"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "agent/tests"]
 addopts = "-q"
 filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]

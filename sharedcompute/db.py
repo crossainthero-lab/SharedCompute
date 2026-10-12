@@ -1,14 +1,31 @@
 """SQLite access. One short-lived connection per unit of work; writes are serialized."""
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
-SCHEMA_FILE = Path(__file__).with_name("schema.sql")
+MIGRATIONS_DIR = Path(__file__).with_name("migrations")
+
+
+def migrations() -> list[tuple[int, Path]]:
+    """Ordered (version, file) pairs from migrations/NNNN_name.sql."""
+    found = []
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        m = re.match(r"^(\d{4})_", path.name)
+        if m:
+            found.append((int(m.group(1)), path))
+    found.sort()
+    versions = [v for v, _ in found]
+    if versions != list(range(1, len(versions) + 1)):
+        raise RuntimeError(f"Migrations must be numbered 0001.. without gaps, found {versions}")
+    return found
+
+
+SCHEMA_VERSION = len(migrations())
 
 
 class Database:
@@ -48,28 +65,36 @@ class Database:
             finally:
                 conn.close()
 
-    def migrate(self) -> bool:
-        """Create the schema if needed. Returns True when a fresh database was created."""
+    def version(self) -> int:
+        with self.read() as conn:
+            return conn.execute("PRAGMA user_version").fetchone()[0]
+
+    def migrate(self, target: int | None = None) -> list[int]:
+        """Apply pending migrations up to `target` (default: latest). Returns the versions applied."""
+        target = SCHEMA_VERSION if target is None else target
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        applied = []
         with self._write_lock:
             conn = self._connect()
             try:
                 conn.execute("PRAGMA journal_mode = WAL")
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version == SCHEMA_VERSION:
-                    return False
-                if version != 0:
-                    raise RuntimeError(
-                        f"Database {self.path} has schema version {version}; "
-                        f"this build expects {SCHEMA_VERSION}."
-                    )
-                if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'providers'").fetchone():
-                    raise RuntimeError(
-                        f"{self.path} is a v0.1 prototype database. Move it aside; "
-                        "the v0.1 demo data is not migrated."
-                    )
-                conn.executescript("BEGIN;" + SCHEMA_FILE.read_text() +
-                                   f"PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
-                return True
+                if version > SCHEMA_VERSION:
+                    raise RuntimeError(f"Database {self.path} has schema version {version}; this build "
+                                       f"only knows up to {SCHEMA_VERSION}. Upgrade SharedCompute.")
+                if version == 0 and conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'providers'").fetchone():
+                    raise RuntimeError(f"{self.path} is a v0.1 prototype database. Move it aside; "
+                                       "the v0.1 demo data is not migrated.")
+                for number, path in migrations():
+                    if version < number <= target:
+                        # Each migration and its version bump commit atomically.
+                        try:
+                            conn.executescript("BEGIN;" + path.read_text() + f"\nPRAGMA user_version = {number}; COMMIT;")
+                        except sqlite3.Error as exc:
+                            if conn.in_transaction:
+                                conn.execute("ROLLBACK")
+                            raise RuntimeError(f"Migration {path.name} failed: {exc}") from exc
+                        applied.append(number)
+                return applied
             finally:
                 conn.close()

@@ -28,6 +28,7 @@ class JobIn(Strict):
     est_minutes: int
     max_budget_usd: Usd
     region: str = "any"
+    min_compute_capability: str | None = None
 
 
 class QuoteIn(Strict):
@@ -36,6 +37,7 @@ class QuoteIn(Strict):
     est_minutes: int
     max_budget_usd: Usd
     region: str = "any"
+    min_compute_capability: str | None = None
 
 
 class TopupIn(Strict):
@@ -63,22 +65,29 @@ class GpuPatch(Strict):
 
 
 class GpuReport(BaseModel):
+    """One compute device (GPU or CPU) as reported by the agent."""
     slot: int
     vendor: str
     model: str
     vram_mb: int
     detection: str
+    device_type: str = "gpu"
     fingerprint: str | None = None
     cuda: bool = False
     compute_capability: str | None = None
+    cuda_driver_version: int | None = None
     driver_version: str | None = None
     integrated: bool = False
+    display_active: bool | None = None
+    vram_free_mb: int | None = None
+    offered: bool = False
+    offer_note: str | None = None
+    workloads: list[str] = []
 
 
 class HelloIn(BaseModel):
     agent_version: str
     platform: str | None = None
-    capabilities: list[str] = []
     max_concurrency: int = 1
     gpus: list[GpuReport] = []
 
@@ -103,3 +112,4 @@ class CompleteIn(BaseModel):
 class FailIn(BaseModel):
     reason: str = "Agent reported a failure"
     retryable: bool = False
+    code: str | None = None  # "incompatible": graceful hardware rejection

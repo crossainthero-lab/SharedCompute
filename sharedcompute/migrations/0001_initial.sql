@@ -1,4 +1,4 @@
--- SharedCompute schema, version 1.
+-- SharedCompute schema, migration 0001 (v0.2 baseline). Never edit an applied migration; add a new one.
 -- Portable SQL where practical so the move to PostgreSQL stays mechanical.
 
 CREATE TABLE users (

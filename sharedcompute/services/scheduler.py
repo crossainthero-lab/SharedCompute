@@ -26,9 +26,18 @@ def _smoothed(reliability: dict, node_id: int) -> float:
     return (r["completed"] + 1) / (r["completed"] + r["issues"] + 2)
 
 
+def _meets_cc(job: dict, r: sqlite3.Row) -> bool:
+    need = workloads.parse_cc(job.get("min_compute_capability"))
+    if need is None:
+        return True
+    have = workloads.parse_cc(r["compute_capability"])
+    return have is not None and have >= need
+
+
 def _matches(job: dict, r: sqlite3.Row, workload: workloads.Workload, settings: Settings) -> bool:
     return (nodes.supports(workload, r)
             and r["vram_mb"] >= job["min_vram_mb"]
+            and _meets_cc(job, r)
             and (job["region"] == regions.ANY or r["region"] == job["region"])
             and (settings.allow_self_match or r["owner_id"] != job["owner_id"]))
 
@@ -91,33 +100,48 @@ def preview(conn: sqlite3.Connection, settings: Settings, owner_id: int, body: d
     workload = workloads.get(body.get("workload"))  # type: ignore[arg-type]
     if workload is None:
         raise InvalidInput("Choose a supported workload", field="workload")
+    min_cc = body.get("min_compute_capability") or None
+    if min_cc is not None and workloads.parse_cc(min_cc) is None:
+        raise InvalidInput("Compute capability must look like 6.1", field="min_compute_capability")
     job = {
         "workload": workload.id,
-        "min_vram_mb": v.integer(body.get("min_vram_gb"), "min_vram_gb", "Minimum VRAM", 1, 192) * nodes.MB_PER_GB,
+        "min_vram_mb": v.integer(body.get("min_vram_gb"), "min_vram_gb", "Minimum VRAM", 0, 192) * nodes.MB_PER_GB,
         "est_minutes": v.integer(body.get("est_minutes"), "est_minutes", "Estimated GPU-minutes", 1, 10_080),
         "max_budget_cents": v.usd(body.get("max_budget_usd"), "max_budget_usd", "Maximum budget"),
         "region": v.region(body.get("region"), allow_any=True),
+        "min_compute_capability": min_cc,
         "owner_id": owner_id,
     }
     now = settings.now()
     reliability = nodes.node_reliability(conn)
-    rows = nodes.listing_rows(conn)
+    rows = [r for r in nodes.listing_rows(conn) if r["offered"]]
 
     def result(outcome: str, reason: str, **extra) -> dict:
         return {"outcome": outcome, "reason": reason, "match": None, "cheapest_quote_cents": None,
                 "compatible": 0, "available_now": 0, **extra}
 
-    stage = [r for r in rows if nodes.supports(workload, r)]
+    kind = "simulated" if workload.execution == "simulated" else "agent"
+    candidates = [r for r in rows if r["kind"] == kind and (kind == "simulated" or r["device_type"] == workload.device)]
+    stage = [r for r in candidates if nodes.supports(workload, r)]
     if not stage:
-        return result("no_capacity", f"No listed GPU can run “{workload.label}” yet. "
-                      "The job would wait until one is connected.")
+        if kind == "agent":
+            reasons = sorted({reason for r in candidates for reason in workloads.incompatibilities(workload, r)})
+            if reasons:
+                return result("no_capacity", f"Connected {workload.device.upper()}s cannot run “{workload.label}”: "
+                              f"{'; '.join(reasons)}. The job would wait for compatible hardware.")
+            return result("no_capacity", f"No connected provider offers a {workload.device.upper()} for "
+                          f"“{workload.label}” yet. The job would wait until one does.")
+        return result("no_capacity", f"No listed GPU can run “{workload.label}” yet.")
     stage = [r for r in stage if r["vram_mb"] >= job["min_vram_mb"]]
     if not stage:
-        return result("no_capacity", f"No GPU that runs this workload has {job['min_vram_mb'] // 1024} GB "
-                      "or more VRAM.")
+        return result("no_capacity", f"No compatible device has {job['min_vram_mb'] // 1024} GB or more VRAM.")
+    if min_cc:
+        stage = [r for r in stage if _meets_cc(job, r)]
+        if not stage:
+            return result("no_capacity", f"No compatible GPU has compute capability {min_cc} or newer.")
     stage = [r for r in stage if job["region"] == regions.ANY or r["region"] == job["region"]]
     if not stage:
-        return result("no_capacity", f"No compatible GPU is listed in {regions.label(job['region'])}.")
+        return result("no_capacity", f"No compatible device is listed in {regions.label(job['region'])}.")
     if not settings.allow_self_match:
         stage = [r for r in stage if r["owner_id"] != owner_id]
         if not stage:
@@ -141,6 +165,7 @@ def preview(conn: sqlite3.Connection, settings: Settings, owner_id: int, body: d
         "outcome": "match",
         "reason": "Would be assigned immediately if still free at submission.",
         "match": {"gpu_id": best["id"], "model": best["model"], "vram_gb": round(best["vram_mb"] / 1024, 1),
+                  "device_type": best["device_type"], "compute_capability": best["compute_capability"],
                   "node_name": best["node_name"], "region_label": regions.label(best["region"]),
                   "execution": best["kind"], "hourly_cents": best["hourly_cents"],
                   "quote_cents": quotes[best["id"]]},

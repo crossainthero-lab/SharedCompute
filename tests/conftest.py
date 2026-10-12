@@ -1,6 +1,10 @@
+import sys
 from pathlib import Path
 
 import pytest
+
+# Agent-side test helpers (fake libcuda) live with the agent's own tests.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent" / "tests"))
 
 from fastapi.testclient import TestClient
 

@@ -8,7 +8,7 @@ def test_health_and_meta(anon, app):
     assert anon.get("/api/health").json()["ok"] is True
     meta = anon.get("/api/v1/meta").json()
     assert meta["platform_fee_bps"] == 1000
-    assert {w["id"] for w in meta["workloads"]} >= {"sim.image", "agent.hashchain", "agent.matmul"}
+    assert {w["id"] for w in meta["workloads"]} >= {"sim.image", "agent.hashchain", "agent.cuda_matmul"}
     assert any(r["code"] == "au-syd" for r in meta["regions"])
 
 

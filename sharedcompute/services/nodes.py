@@ -1,4 +1,8 @@
-"""Provider nodes and their GPUs: registration, pricing, availability and marketplace listings."""
+"""Provider nodes and their compute devices: registration, pricing, availability and listings.
+
+The `gpus` table holds devices; `device_type` is 'gpu' or 'cpu'. A device is only scheduled when the
+agent has offered it (the provider's opt-in on the machine) and the dashboard switch is on.
+"""
 from __future__ import annotations
 
 import json
@@ -12,6 +16,7 @@ from ..security import NODE_PREFIX, new_token, token_hash
 from . import accounts, jobs
 
 MB_PER_GB = 1024
+SIMULATED_WORKLOADS = [w.id for w in workloads.CATALOGUE.values() if w.execution == "simulated"]
 MAX_HOURLY_CENTS = 100_00  # $100/GPU-hour ceiling guards against typos
 
 SAMPLE_NETWORK = [
@@ -24,7 +29,7 @@ SAMPLE_NETWORK = [
 
 LISTING_SQL = """
 SELECT g.*, n.name AS node_name, n.region, n.kind, n.enabled AS node_enabled, n.last_seen_at,
-       n.owner_id, n.capabilities, n.max_concurrency, u.display_name AS provider_name,
+       n.owner_id, n.capabilities AS node_capabilities, n.max_concurrency, u.display_name AS provider_name,
        (SELECT COUNT(*) FROM jobs j WHERE j.gpu_id = g.id AND j.status IN ('assigned','running')) AS gpu_active,
        (SELECT COUNT(*) FROM jobs j WHERE j.node_id = n.id AND j.status IN ('assigned','running')) AS node_active
 FROM gpus g JOIN nodes n ON n.id = g.node_id JOIN users u ON u.id = n.owner_id
@@ -40,7 +45,9 @@ def node_online(node: sqlite3.Row, settings: Settings, now: float) -> bool:
 
 
 def gpu_state(r: sqlite3.Row, settings: Settings, now: float) -> str:
-    """available | busy | paused | offline. Shared by listings and the scheduler."""
+    """available | busy | paused | offline | not_offered. Shared by listings and the scheduler."""
+    if not r["offered"]:
+        return "not_offered"
     if not node_online(r, settings, now):
         return "offline"
     if not r["node_enabled"] or not r["enabled"]:
@@ -51,10 +58,11 @@ def gpu_state(r: sqlite3.Row, settings: Settings, now: float) -> str:
 
 
 def supports(workload: workloads.Workload, r: sqlite3.Row) -> bool:
+    """The device advertises the workload AND the server's own hardware check agrees."""
     if workload.execution == "simulated":
-        return r["kind"] == "simulated"
+        return r["kind"] == "simulated" and r["device_type"] == "gpu"
     return (r["kind"] == "agent" and workload.id in json.loads(r["capabilities"])
-            and (not workload.requires_cuda or bool(r["cuda"])))
+            and not workloads.incompatibilities(workload, r))
 
 
 def node_reliability(conn: sqlite3.Connection) -> dict[int, dict]:
@@ -77,8 +85,9 @@ def listing_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 def _listing(r: sqlite3.Row, settings: Settings, now: float, reliability: dict) -> dict:
     return {
-        "id": r["id"], "model": r["model"], "vendor": r["vendor"],
+        "id": r["id"], "model": r["model"], "vendor": r["vendor"], "device_type": r["device_type"],
         "vram_gb": round(r["vram_mb"] / MB_PER_GB, 1), "hourly_cents": r["hourly_cents"],
+        "compute_capability": r["compute_capability"], "cuda_driver_version": r["cuda_driver_version"],
         "region": r["region"], "region_label": regions.label(r["region"]),
         "status": gpu_state(r, settings, now), "execution": r["kind"], "detection": r["detection"],
         "cuda": bool(r["cuda"]), "integrated": bool(r["integrated"]),
@@ -98,12 +107,15 @@ def _metrics(r: sqlite3.Row, settings: Settings, now: float) -> dict | None:
 def marketplace(conn: sqlite3.Connection, settings: Settings) -> dict:
     now = settings.now()
     reliability = node_reliability(conn)
-    gpus = [_listing(r, settings, now, reliability) for r in listing_rows(conn)]
+    # Devices the agent has not offered are visible to their owner only.
+    gpus = [_listing(r, settings, now, reliability) for r in listing_rows(conn) if r["offered"]]
     available = [g for g in gpus if g["status"] == "available"]
     return {
         "gpus": gpus,
         "summary": {
             "listed": len(gpus),
+            "listed_gpus": sum(g["device_type"] == "gpu" for g in gpus),
+            "listed_cpus": sum(g["device_type"] == "cpu" for g in gpus),
             "available": len(available),
             "busy": sum(g["status"] == "busy" for g in gpus),
             "agent_connected": sum(g["execution"] == "agent" and g["status"] != "offline" for g in gpus),
@@ -164,16 +176,16 @@ def create_node(conn: sqlite3.Connection, settings: Settings, owner_id: int, bod
         """INSERT INTO nodes(owner_id, name, region, kind, token_hash, default_hourly_cents, capabilities, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (owner_id, name, region, kind, token_hash(token) if token else None, price,
-         json.dumps([w for w, wl in workloads.CATALOGUE.items() if wl.execution == "simulated"])
-         if kind == "simulated" else "[]", now),
+         json.dumps(SIMULATED_WORKLOADS) if kind == "simulated" else "[]", now),
     ).lastrowid
     if kind == "simulated":
         model = v.text(body.get("gpu_model"), "gpu_model", "GPU model", min_len=2, max_len=60)
         vram_gb = v.integer(body.get("vram_gb"), "vram_gb", "VRAM", 1, 192)
         conn.execute(
-            """INSERT INTO gpus(node_id, slot, vendor, model, vram_mb, detection, hourly_cents, created_at)
-               VALUES (?, 0, ?, ?, ?, 'self_reported', ?, ?)""",
-            (node_id, infer_vendor(model), model, vram_gb * MB_PER_GB, price, now),
+            """INSERT INTO gpus(node_id, slot, vendor, model, vram_mb, detection, hourly_cents, capabilities,
+                               created_at)
+               VALUES (?, 0, ?, ?, ?, 'self_reported', ?, ?, ?)""",
+            (node_id, infer_vendor(model), model, vram_gb * MB_PER_GB, price, json.dumps(SIMULATED_WORKLOADS), now),
         )
     return {"id": node_id, "agent_token": token}
 
@@ -231,9 +243,13 @@ def owned_nodes(conn: sqlite3.Connection, settings: Settings, owner_id: int) -> 
                   COALESCE(SUM(billed_seconds), 0) AS billed_seconds
            FROM jobs WHERE provider_id = ? AND status = 'completed' GROUP BY node_id""", (owner_id,))}
     gpu_rows: dict[int, list] = {}
-    for r in conn.execute(LISTING_SQL + " AND n.owner_id = ? ORDER BY g.slot", (owner_id,)):
+    for r in conn.execute(LISTING_SQL + " AND n.owner_id = ? ORDER BY g.device_type DESC, g.slot", (owner_id,)):
         gpu_rows.setdefault(r["node_id"], []).append({
             "id": r["id"], "slot": r["slot"], "model": r["model"], "vendor": r["vendor"],
+            "device_type": r["device_type"], "offered": bool(r["offered"]), "offer_note": r["offer_note"],
+            "display_active": None if r["display_active"] is None else bool(r["display_active"]),
+            "vram_free_mb": r["vram_free_mb"], "cuda_driver_version": r["cuda_driver_version"],
+            "workloads": [w.id for w in workloads.CATALOGUE.values() if supports(w, r)],
             "vram_gb": round(r["vram_mb"] / MB_PER_GB, 1), "hourly_cents": r["hourly_cents"],
             "enabled": bool(r["enabled"]), "status": gpu_state(r, settings, now), "detection": r["detection"],
             "cuda": bool(r["cuda"]), "integrated": bool(r["integrated"]),

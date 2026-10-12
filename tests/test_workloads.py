@@ -1,14 +1,8 @@
 """Server verifiers and agent implementations must agree; both sides are checked here."""
+import pytest
+
 from sharedcompute import workloads as server
 from sharedcompute_agent import workloads as agent
-
-
-def naive_matmul_sum(a, b, n):
-    total = 0
-    for i in range(n):
-        for j in range(n):
-            total += sum(a[i * n + k] * b[k * n + j] for k in range(n))
-    return total
 
 
 def test_hashchain_agent_output_verifies_on_server():
@@ -16,58 +10,91 @@ def test_hashchain_agent_output_verifies_on_server():
     output = agent.hashchain(params, lambda: False)
     ok, detail = server.verify("agent.hashchain", params, output)
     assert ok, detail
-    tampered = dict(output, digest="00" * 32)
-    assert server.verify("agent.hashchain", params, tampered)[0] is False
+    assert server.verify("agent.hashchain", params, dict(output, digest="00" * 32))[0] is False
 
 
-def test_hashchain_params_are_fresh_per_assignment():
-    w = server.get("agent.hashchain")
-    a = server.issue_params(w, hashchain_iterations=10)
-    b = server.issue_params(w, hashchain_iterations=10)
-    assert a["seed"] != b["seed"]
+def test_params_are_fresh_per_assignment():
+    for wid in ("agent.hashchain", "agent.cuda_matmul"):
+        a = server.issue_params(server.get(wid), hashchain_iterations=10)
+        b = server.issue_params(server.get(wid), hashchain_iterations=10)
+        assert a["seed"] != b["seed"]
 
 
-def test_matmul_checksum_identity_matches_naive_product():
+def test_lcg_and_matrices_agree():
+    assert server.lcg_values(42, 1000) == agent.lcg_values(42, 1000)
+    a, b = agent.seeded_matrices(42, 10)
+    values = server.lcg_values(42, 200)
+    assert (a, b) == (values[:100], values[100:])
+    assert set(a + b) <= set(range(-8, 9))
+
+
+def test_checksum_identity_matches_full_product():
     for seed, n in [(1, 4), (12345, 9), (2**32 - 1, 16)]:
         a, b = agent.seeded_matrices(seed, n)
-        assert server.matmul_checksum(seed, n) == naive_matmul_sum(a, b, n)
+        assert server.matmul_checksum(seed, n) == sum(agent.cpu_matmul(a, b, n))
+        for i in range(n):
+            assert server.matmul_row(a, b, n, i) == agent.cpu_matmul(a, b, n)[i * n:(i + 1) * n]
 
 
-def test_matmul_values_are_small_integers_so_fp32_is_exact():
-    a, b = agent.seeded_matrices(99, 32)
-    assert set(a + b) <= set(range(-8, 9))
-    # Worst-case dot product magnitude for the verification size stays far below 2**24.
-    assert server.MATMUL_VERIFY_N * 64 < 2**24
+def test_int32_never_overflows_at_production_size():
+    # |A[i,k] * B[k,j]| <= 64, so a dot product of length n stays within +-64n.
+    assert 64 * server.MATMUL_N < 2**31
 
 
-def test_matmul_verifier_rejects_wrong_or_non_integer_checksums():
-    params = {"seed": 7, "n": 8, "bench_n": 16, "repeats": 1}
-    right = server.matmul_checksum(7, 8)
-    assert server.verify("agent.matmul", params, {"checksum": right})[0]
-    assert not server.verify("agent.matmul", params, {"checksum": right + 1})[0]
-    assert not server.verify("agent.matmul", params, {"checksum": float(right)})[0]
-    assert not server.verify("agent.matmul", params, {"checksum": True})[0]
-    assert not server.verify("agent.matmul", params, "not a dict")[0]
+def test_merkle_and_challenge_primitives_agree():
+    rows = [[i * 3 + j for j in range(5)] for i in range(7)]
+    assert all(server.merkle_leaf(i, r) == agent.merkle_leaf(i, r) for i, r in enumerate(rows))
+    assert server.challenge_rows("ab" * 32, "cd" * 16, 4, 7) == agent.challenge_rows("ab" * 32, "cd" * 16, 4, 7)
+    assert len(set(server.challenge_rows("ab" * 32, "cd" * 16, 10, 7))) == 7  # capped at n, no repeats
 
 
-def test_matmul_without_cuda_fails_cleanly(monkeypatch):
-    monkeypatch.setattr(agent, "_torch", lambda: None)
-    assert agent.capabilities() == ["agent.hashchain"]
-    try:
-        agent.matmul({"seed": 1, "n": 4, "bench_n": 4, "repeats": 1}, lambda: False)
-    except RuntimeError as exc:
-        assert "CUDA" in str(exc)
-    else:
-        raise AssertionError("matmul must refuse to run without CUDA")
+def test_agent_matmul_commitment_verifies_on_server(monkeypatch):
+    monkeypatch.setattr(server, "MATMUL_N", 24)
+    params = server.issue_params(server.get("agent.cuda_matmul"), hashchain_iterations=0)
+    a, b = agent.seeded_matrices(params["seed"], params["n"])
+    out = agent.commit(agent.cpu_matmul(a, b, params["n"]), params["n"], params["nonce"], params["samples"])
+    ok, detail = server.verify("agent.cuda_matmul", params, out)
+    assert ok and "4 challenged rows" in detail
 
 
-def test_hashchain_honours_cancellation():
-    import pytest
+@pytest.mark.parametrize("bad", [{"checksum": 1.0}, {"checksum": True}, {"merkle_root": "zz"}, {"samples": "x"}])
+def test_matmul_verifier_rejects_malformed_output(monkeypatch, bad):
+    monkeypatch.setattr(server, "MATMUL_N", 8)
+    params = server.issue_params(server.get("agent.cuda_matmul"), hashchain_iterations=0)
+    a, b = agent.seeded_matrices(params["seed"], 8)
+    out = agent.commit(agent.cpu_matmul(a, b, 8), 8, params["nonce"], params["samples"])
+    out.update(bad)
+    assert server.verify("agent.cuda_matmul", params, out)[0] is False
+    assert server.verify("agent.cuda_matmul", params, "not a dict")[0] is False
 
-    with pytest.raises(agent.Cancelled):
-        agent.hashchain({"seed": "00" * 32, "iterations": 100_000}, lambda: True)
+
+def test_requirements_agree_between_server_and_agent():
+    for wid, req in agent.REQUIREMENTS.items():
+        w = server.get(wid)
+        assert w.device == req["device"]
+        if w.min_compute_capability:
+            assert server.parse_cc(w.min_compute_capability) == req["min_compute_capability"]
+            assert w.min_cuda_driver == req["min_cuda_driver"] and w.min_vram_mb == req["min_vram_mb"]
+    assert {w.id for w in server.CATALOGUE.values() if w.execution == "agent"} == set(agent.REQUIREMENTS)
+
+
+def device(**kw):
+    base = {"device_type": "gpu", "cuda": 1, "compute_capability": "6.1", "cuda_driver_version": 12020, "vram_mb": 4096}
+    base.update(kw)
+    return base
+
+
+def test_incompatibility_reasons_for_old_hardware():
+    w = server.get("agent.cuda_matmul")
+    assert server.incompatibilities(w, device()) == []
+    assert server.incompatibilities(w, device(compute_capability="3.0", cuda_driver_version=5050, vram_mb=64)) == []
+    assert server.incompatibilities(w, device(compute_capability="2.1")) == ["compute capability 2.1 is below 3.0"]
+    assert server.incompatibilities(w, device(cuda_driver_version=5000)) == ["driver supports CUDA 5.0; needs 5.5 or newer"]
+    assert server.incompatibilities(w, device(cuda=0)) == ["needs an NVIDIA GPU with a working CUDA driver"]
+    assert server.incompatibilities(w, device(device_type="cpu")) == ["needs a GPU device"]
+    assert server.incompatibilities(w, device(compute_capability=None)) == ["compute capability unknown"]
+    assert server.parse_cc("10.0") == (10, 0) and server.parse_cc("6") is None
 
 
 def test_simulated_workloads_have_no_verifier():
     assert server.verify("sim.image", {}, {})[0] is False
-    assert all(w.execution in ("simulated", "agent") for w in server.CATALOGUE.values())
