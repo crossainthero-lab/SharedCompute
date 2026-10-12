@@ -1,0 +1,25 @@
+# Provider-only install: `pip install ./agent` on the GPU machine. No third-party dependencies;
+# needs only Python 3.8+ and, for GPU work, the NVIDIA driver (no CUDA toolkit, no PyTorch).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharedcompute-agent"
+version = "0.3.0"
+description = "SharedCompute provider agent: offers chosen GPUs/CPU to the marketplace and runs verifiable workloads."
+requires-python = ">=3.8"
+license = { text = "Proprietary" }
+dependencies = []
+
+[project.optional-dependencies]
+nvml = ["nvidia-ml-py>=11"]
+
+[project.scripts]
+sharedcompute-agent = "sharedcompute_agent.__main__:main"
+
+[tool.setuptools]
+packages = ["sharedcompute_agent"]
+
+[tool.setuptools.package-data]
+sharedcompute_agent = ["kernels/*.ptx"]
