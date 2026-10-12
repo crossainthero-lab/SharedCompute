@@ -1,0 +1,6 @@
+*.sqlite3
+__pycache__/
+*.pyc
+
+# Source archive of the v0.1 draft (contents are committed)
+/SharedCompute_MVP_Draft_*.zip

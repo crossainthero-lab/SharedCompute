@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <title>SharedCompute — GPU marketplace prototype</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <button class="brand" data-route="overview" aria-label="Go to overview">
+        <span class="brand-icon"><svg viewBox="0 0 36 36" fill="none"><path d="M7 13.5 18 7l11 6.5v10L18 30 7 23.5v-10Z" stroke="currentColor" stroke-width="2"/><path d="m7 13.5 11 7 11-7M18 20.5V30" stroke="currentColor" stroke-width="2"/></svg></span>
+        <span class="brand-copy"><strong>SharedCompute</strong><small>NETWORK / v0.1</small></span>
+      </button>
+      <div class="nav-label">WORKSPACE</div>
+      <nav aria-label="Main navigation">
+        <button class="nav active" data-route="overview"><span class="nav-ico">◫</span>Overview</button>
+        <button class="nav" data-route="marketplace"><span class="nav-ico">▦</span>GPU marketplace</button>
+        <button class="nav" data-route="jobs"><span class="nav-ico">⇄</span>My jobs</button>
+        <button class="nav" data-route="host"><span class="nav-ico">▤</span>Host a GPU</button>
+        <button class="nav" data-route="economics"><span class="nav-ico">◈</span>Economics</button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sandbox-notice"><span class="notice-dot"></span><div><b>Local sandbox</b><small>No real compute or payments</small></div></div>
+      <div class="sidebar-foot">Built as a first draft for the founders.<br />No account or API key needed.</div>
+    </aside>
+    <div class="main-column">
+      <header class="topbar">
+        <div class="breadcrumb">WORKSPACE <span>/</span> <strong id="breadcrumb">Overview</strong></div>
+        <div class="top-actions"><span class="small-tag">SIMULATED NETWORK</span><span class="avatar" title="Founder workspace">SC</span></div>
+      </header>
+      <main id="content" aria-live="polite"></main>
+      <footer>SharedCompute concept prototype · All node listings and costs are demo data. <button class="text-link" id="resetBtn">Reset demo</button></footer>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
