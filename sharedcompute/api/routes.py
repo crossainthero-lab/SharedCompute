@@ -44,6 +44,8 @@ def meta(request: Request):
         "simulation_seconds": s.simulation_seconds,
         "demo_credits_enabled": s.demo_credits_enabled,
         "max_attempts": s.max_attempts,
+        "registration_open": s.registration_open,
+        "public_marketplace": s.public_marketplace,
         "workloads": [w.public() for w in workloads.CATALOGUE.values()],
         "regions": [{"code": c, "label": label} for c, label in regions.REGIONS.items()],
     }
@@ -51,8 +53,10 @@ def meta(request: Request):
 
 @router.post("/auth/register", tags=["auth"], status_code=201)
 def register(body: RegisterIn, request: Request, response: Response):
-    _rate_limit(request, "register")
     s = deps.settings(request)
+    if not s.registration_open:
+        raise Forbidden("Registration is closed on this deployment. Ask an operator to create your account.")
+    _rate_limit(request, "register")
     with deps.db(request).write() as conn:
         user = accounts.register(conn, s, body.email, body.password, body.display_name)
         token = accounts.create_session(conn, s, user["id"])
@@ -91,13 +95,15 @@ def me(request: Request, user: dict = Depends(deps.current_user)):
 
 @router.get("/marketplace", tags=["marketplace"])
 def marketplace(request: Request):
+    if not deps.settings(request).public_marketplace:
+        deps.current_user(request)
     with deps.db(request).read() as conn:
         return nodes.marketplace(conn, deps.settings(request))
 
 
 @router.post("/quotes", tags=["marketplace"])
 def quote(body: QuoteIn, request: Request):
-    user = deps.optional_user(request)
+    user = deps.current_user(request) if not deps.settings(request).public_marketplace else deps.optional_user(request)
     with deps.db(request).read() as conn:
         return scheduler.preview(conn, deps.settings(request), user["id"] if user else 0, body.model_dump())
 

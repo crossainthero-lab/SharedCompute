@@ -75,8 +75,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if ticker:
                 ticker.stop()
 
+    docs = settings.expose_api_docs
     app = FastAPI(title="SharedCompute API", version=__version__, lifespan=lifespan,
-                  docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
+                  docs_url="/api/docs" if docs else None, openapi_url="/api/openapi.json" if docs else None,
+                  redoc_url=None)
     app.state.settings = settings
     app.state.db = db
 

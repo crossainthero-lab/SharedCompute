@@ -49,6 +49,11 @@ class Settings:
     # Real agent workloads.
     hashchain_iterations: int = 250_000
 
+    # Exposure. `serve` tightens these automatically when bound to anything but loopback.
+    registration_open: bool = True     # anyone may create an account
+    public_marketplace: bool = True    # listings and quotes readable without signing in
+    expose_api_docs: bool = True       # /api/docs and /api/openapi.json
+
     # Auth.
     password_iterations: int = 600_000
     session_ttl_seconds: int = 14 * 24 * 3600
@@ -77,6 +82,13 @@ class Settings:
         s.hashchain_iterations = _int("SHAREDCOMPUTE_HASHCHAIN_ITERATIONS", s.hashchain_iterations)
         s.password_iterations = _int("SHAREDCOMPUTE_PASSWORD_ITERATIONS", s.password_iterations)
         s.cookie_secure = _bool("SHAREDCOMPUTE_COOKIE_SECURE", s.cookie_secure)
+        if os.environ.get("SHAREDCOMPUTE_REGISTRATION"):
+            mode = os.environ["SHAREDCOMPUTE_REGISTRATION"].strip().lower()
+            if mode not in ("open", "closed"):
+                raise ValueError("SHAREDCOMPUTE_REGISTRATION must be 'open' or 'closed'")
+            s.registration_open = mode == "open"
+        s.public_marketplace = _bool("SHAREDCOMPUTE_PUBLIC_MARKETPLACE", s.public_marketplace)
+        s.expose_api_docs = _bool("SHAREDCOMPUTE_API_DOCS", s.expose_api_docs)
         s.validate()
         return s
 
