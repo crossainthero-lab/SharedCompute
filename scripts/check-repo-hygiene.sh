@@ -7,7 +7,7 @@ status=0
 
 tracked=$(git ls-files)
 bad_files=$(printf '%s\n' "$tracked" | grep -E '\.(sqlite3|db|pem|key|token|p12|pfx)$|(^|/)\.env($|\.)|(^|/)data/|\.DS_Store$|__pycache__|\.egg-info/' \
-  | grep -v '^agent/tests/fixtures/' || true)
+  | grep -v '^agent/tests/fixtures/' | grep -v '\.example$' || true)
 if [ -n "$bad_files" ]; then
   echo "Tracked files that should not be committed:"; echo "$bad_files"; status=1
 fi
