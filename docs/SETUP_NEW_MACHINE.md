@@ -7,7 +7,7 @@ The rules in [CLAUDE.md §4](../CLAUDE.md#4-non-negotiable-rules) apply througho
 ## 0. Get the code and identify the machine
 
 ```bash
-git clone https://github.com/crossainthero-lab/SharedCompute.git   # private: needs access (gh auth login)
+git clone https://github.com/crossainthero-lab/SharedCompute.git   # if access is refused: gh auth login
 cd SharedCompute
 git checkout feature/mvp-integration                              # the current development branch
 uname -s; uname -m

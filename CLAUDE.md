@@ -20,7 +20,7 @@ It is a **local MVP** (v0.3): no real money, no token, no customer-supplied code
 
 ## 2. Branches and repository
 
-- GitHub: `crossainthero-lab/SharedCompute` (**private**). The default branch is `feature/mvp-integration`.
+- GitHub: `crossainthero-lab/SharedCompute` (check its visibility with `gh repo view --json visibility`; anything you push may be public). The default branch is `feature/mvp-integration`.
 - **`feature/mvp-integration` is the current development branch.** `main` holds the untouched v0.1 founders'
   draft, the baseline of the history.
 - Never merge into `main`, force-push, rewrite published history or deploy without explicit approval from the
@@ -66,6 +66,7 @@ It is a **local MVP** (v0.3): no real money, no token, no customer-supplied code
 - Remote agents must use `https://`. Never weaken TLS checks or disable certificate verification.
 
 **Secrets and data**
+- Treat the repository as public: never commit personal data, real hostnames, IPs or test logs containing them.
 - Never commit or print node tokens (`scn_…`), session tokens (`scs_…`), `.env`, TLS keys, wallets or
   databases. Machine settings live outside Git (`.env`, `~/.config/sharedcompute/agent.env`, `node.token`, mode 600).
 - Never delete `data/` or a database. Upgrade with `python -m sharedcompute migrate`, which backs up first.

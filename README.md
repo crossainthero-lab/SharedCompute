@@ -1,146 +1,143 @@
 # SharedCompute
 
-A marketplace that matches AI compute jobs to independently owned GPUs. Providers run a small agent and
-choose which devices to offer and at what hourly price. Customers submit jobs with requirements and a
-budget. A scheduler picks the cheapest compatible device. Completed, verified work is settled with a 10%
-marketplace fee and a 90% provider share.
+**A marketplace that matches AI compute jobs to independently owned GPUs.** Providers run a small agent and
+choose which devices to offer and at what hourly price. Customers submit jobs with requirements (VRAM,
+compute capability, region) and a budget. A scheduler picks the cheapest compatible device. Completed,
+verified work is settled with a 10% marketplace fee and a 90% provider share.
 
-Founded by William and Stefan. **v0.3: local MVP, preparing for real low-end GPUs.**
+Founded by William and Stefan. This is an **early-stage MVP (v0.3)** developed in the open. It is not a
+production service: there is no hosted marketplace to join, and no real money or cryptocurrency is involved.
 
-> **Status:**
-> - **Works:** the marketplace, scheduler, ledger, UI and provider agent. Real jobs have run on a real
->   machine's CPU.
-> - **Built but unverified:** the GPU path (a CUDA kernel loaded through the NVIDIA driver, server-side
->   verification, execution evidence) has been tested only against a fake driver. It **has not yet run on an
->   NVIDIA GPU**.
-> - **Simulated:** balances are demo credits; no money moves.
+> [!IMPORTANT]
+> **Not yet verified on real hardware or real networks:**
+> - **Real NVIDIA GPU execution has never been run.** The CUDA path (kernel, driver binding, detection) has only
+>   been tested against a fake driver and synthetic `nvidia-smi` output.
+> - **Cross-network operation has never been run.** Agents and the marketplace have only talked over
+>   loopback (including TLS) on one machine.
+>
+> What *has* been verified on real hardware is listed in [docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md). The
+> plan to close these gaps is [docs/TEST_RUNBOOK.md](docs/TEST_RUNBOOK.md) (Tests 2 and 3).
 
-## Repository and branches
+## What works today
 
-- Private repo: **https://github.com/crossainthero-lab/SharedCompute** (request access from the founders).
-- **`feature/mvp-integration` is the current development branch and the repository default.** `main` holds the
-  original v0.1 founders' draft (history baseline). Nothing has been merged into `main`.
+| Area | Status |
+|---|---|
+| Accounts, marketplace, scheduler, job queue, budgets, retries, double-entry ledger, web UI | **Works**: automated tests and browser use |
+| Provider agent executing a real, server-verified job (CPU workload) | **Works**, on an Intel MacBook Pro |
+| Explicit device opt-in; refusal of display-driving and incompatible GPUs | **Works** (NVIDIA-specific detection unverified) |
+| Agent ↔ marketplace over TLS with certificate verification | **Works on one machine** (loopback); not across networks |
+| CUDA integer matmul on an NVIDIA GPU (PTX via the driver, server-verified result) | **Built, never run on a GPU** |
+| "Did it run on the GPU?" | The server verifies results and cross-checks device identity and timing. A GPU claim is attested, **not proven** |
+| Sample GPU listings, simulated workloads, account balances | **Simulated**: demo credits, no money moves |
+| Customer-supplied code or containers, payments, payouts, crypto settlement | **Not built**, deliberately (see [architecture §7–8](docs/ARCHITECTURE.md)) |
+
+## Quick start (development, macOS or Linux)
+
+Requires Python 3.10+ for the marketplace. The provider agent alone needs Python 3.8+.
 
 ```bash
-gh auth login                                       # once per machine, if needed
-gh repo clone crossainthero-lab/SharedCompute       # or: git clone https://github.com/crossainthero-lab/SharedCompute.git
-cd SharedCompute
-git checkout feature/mvp-integration
+git clone https://github.com/crossainthero-lab/SharedCompute.git
+cd SharedCompute                      # the default branch, feature/mvp-integration, is the current MVP
+scripts/bootstrap-dev.sh --smoke      # venv, config, database, tests, end-to-end smoke test
+./start.sh                            # http://127.0.0.1:8765 (loopback only)
 ```
 
-## Set up a new machine
+Register in the browser, add demo credits under *Economics*, and submit jobs under *Jobs*. The four sample GPUs
+(tagged `SIM`) are simulated so the marketplace works out of the box. The setup scripts never use `sudo`,
+change drivers or offer any device. Details for every machine type, including unsupported ones:
+[docs/SETUP_NEW_MACHINE.md](docs/SETUP_NEW_MACHINE.md).
 
-Tell Claude Code (or another coding agent) in the cloned folder:
+Using Claude Code or another coding agent? Open the folder and say *"Set up this SharedCompute repo on this
+machine."* [CLAUDE.md](CLAUDE.md) holds the agents' instructions.
 
-> **Set up this SharedCompute repo on this machine.**
-
-It will read [CLAUDE.md](CLAUDE.md), identify the machine's role and follow
-[docs/SETUP_NEW_MACHINE.md](docs/SETUP_NEW_MACHINE.md). Or do it yourself:
-
-| Machine | Command | Result |
-|---|---|---|
-| Development (macOS or Linux) | `scripts/bootstrap-dev.sh` | `.venv`, `.env`, database, diagnostics, tests |
-| GPU provider (Linux + NVIDIA) | `scripts/bootstrap-agent.sh` | Agent-only venv and config that offers nothing yet, plus diagnostics |
-| Any (read-only check) | `scripts/doctor.sh` | PASS/WARN/FAIL report; changes nothing |
-
-The scripts are idempotent. They never use `sudo`, change drivers, install CUDA/PyTorch, delete data or
-offer any device. Unsupported setups (Windows, nouveau, Fermi, non-NVIDIA GPUs) are explained in
-SETUP_NEW_MACHINE.md §D.
-
-## Run the marketplace
+### Try the provider agent on your own machine (CPU only)
 
 ```bash
-./start.sh                   # http://127.0.0.1:8765, loopback only; bootstraps on first run
-```
-
-Register in the browser, add demo credits under *Economics*, and submit jobs under *Jobs*. To see
-platform-wide economics, run `.venv/bin/python -m sharedcompute make-operator you@example.com`. Settings for
-this machine go in `.env` (from [.env.example](.env.example)). The database is `data/sharedcompute.sqlite3`
-(git-ignored), upgraded in place with an automatic backup.
-
-## Run the provider agent
-
-```bash
-# Try it on this machine (CPU only), against the local marketplace:
-#   Provide -> Add hardware -> Connect a machine, then save the token:
+# In the UI: Provide -> Add hardware -> Connect a machine, then save the one-time token:
 umask 077; printf '%s' 'scn_…' > /tmp/sc-node.token
 .venv/bin/python -m sharedcompute_agent run --token-file /tmp/sc-node.token --offer-cpu
-
-# A real provider machine (after scripts/bootstrap-agent.sh):
-~/.local/share/sharedcompute/agent-venv/bin/python -m sharedcompute_agent diagnose --gpu 0 --selftest
-~/.local/share/sharedcompute/agent-venv/bin/sharedcompute-agent run   # reads ~/.config/sharedcompute/agent.env
 ```
 
-- **Nothing is used unless the owner chooses it** (`--gpu N`, `--offer-cpu`, or the agent config). A GPU that drives a
-  display is refused unless you add `--allow-display-gpu`.
-- **Old hardware:** NVIDIA Kepler (CC 3.0) or newer, a driver supporting CUDA 5.5+, 64 MB free VRAM. No CUDA
-  toolkit or PyTorch: the kernel ships as PTX that the driver compiles.
-- **Remote marketplaces must be `https://`.** The agent only connects outbound and verifies certificates
-  (`--ca-file` for a private CA). Tailscale is the recommended way to join separate networks:
-  [docs/REMOTE_CONNECTIVITY.md](docs/REMOTE_CONNECTIVITY.md).
+Submit a **Pipeline check (CPU)** job. It runs on your CPU, and the server recomputes the result before billing.
 
-## Tests
+### NVIDIA GPU providers (help wanted for testing)
 
 ```bash
-.venv/bin/python -m pytest                           # 219 tests (marketplace + agent)
-.venv/bin/python scripts/smoke_local.py              # real agent + throwaway marketplace, CPU job (Test 1)
-.venv/bin/python scripts/smoke_local.py --gpu 0      # + real CUDA job (NVIDIA Linux only, explicit choice)
-sh scripts/check-repo-hygiene.sh                     # no secrets/databases tracked or in history
+scripts/bootstrap-agent.sh            # agent only: Python 3.8+, no CUDA toolkit or PyTorch; offers nothing
+~/.local/share/sharedcompute/agent-venv/bin/python -m sharedcompute_agent diagnose --gpu 0 --selftest
 ```
 
-**Python versions.**
-- Marketplace: Python 3.10+ (tested on 3.12 and 3.14).
-- Agent: Python 3.8+ (tested on 3.8).
-- One test regenerates the PTX from source. It needs the optional `llvmlite==0.43.0`, which has wheels only for
-  some Python versions and platforms. Without it, that test is **skipped**: expect "1 skipped", e.g. on Python 3.14.
+- **Supported in principle:** NVIDIA Kepler (compute capability 3.0) or newer, with a driver supporting CUDA 5.5+.
+- **Not supported:** Fermi, nouveau, AMD, Intel and Apple GPUs. These are detected and refused with a reason.
+- **Nothing is used unless you choose it**, and a GPU that drives a display is refused unless you explicitly allow it.
 
-A skipped or simulated test is not evidence that hardware works. What has really been verified is listed in
-[docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md). The three-stage hardware plan (Mac only → real NVIDIA GPU →
-two networks) is in [docs/TEST_RUNBOOK.md](docs/TEST_RUNBOOK.md).
+See [docs/HARDWARE_TESTING.md](docs/HARDWARE_TESTING.md). Results from real cards are the most valuable
+contribution right now.
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs:
-- the test suite on Linux and macOS;
-- the agent alone on Python 3.8;
-- the PTX reproducibility check;
-- bootstrap + smoke on fresh runners;
-- the repository hygiene check.
-
-## Architecture in brief
+## How it works
 
 ```
 Browser / API ──▶ FastAPI /api/v1 ──▶ scheduler + queue + double-entry ledger ──▶ SQLite (versioned migrations)
                                    ▲
-provider agent ── HTTPS, outbound, node token ──▶ /api/agent/v1 ──▶ verifiers + execution evidence
-   └─ offered devices only: NVIDIA GPU (CUDA driver API + PTX) and/or CPU
+provider agent ── HTTPS, outbound only, per-node token ──▶ /api/agent/v1 ──▶ result verifiers + execution evidence
+   └─ offers only owner-chosen devices: NVIDIA GPU (CUDA driver API + PTX) and/or CPU
 ```
 
-Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Directory map, commands and rules for agents:
-[CLAUDE.md](CLAUDE.md).
+- Budgets are held at submission. Completed jobs are charged by **server-measured** runtime (never above
+  the quote), then split 90/10. Failures and cancellations cost nothing.
+- Agents run only fixed workload templates whose output the server can check: a SHA-256 chain recomputed
+  on the CPU, and a GPU matrix multiply with an exact checksum and Merkle-committed rows challenged at random.
+- Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## What works, what is simulated, what is not built
+## Tests
 
-| Area | State |
-|---|---|
-| Accounts, marketplace, scheduler, queue, budgets, retries, ledger, UI | **Works** (tested; used in a browser) |
-| Real job executed by the agent and verified (CPU workload) | **Works** on an Intel MacBook Pro |
-| Device opt-in, display-GPU guard, compatibility checks, graceful rejection | **Works**; NVIDIA-specific detection unverified |
-| TLS between agent and marketplace | **Works on loopback**; not yet across two networks |
-| CUDA matmul on an NVIDIA GPU | **Built, never run on hardware** |
-| "Did it run on the GPU?" | Server verifies the result and cross-checks identity and timing; the GPU claim is attested, not proven |
-| Sample network, simulated workloads, balances | **Simulated** by design |
-| Customer containers, real payments, payouts, crypto settlement | **Not built** (deliberately) |
+```bash
+.venv/bin/python -m pytest                        # 219 tests (marketplace + agent)
+.venv/bin/python scripts/smoke_local.py           # real agent + throwaway marketplace, CPU job
+sh scripts/check-repo-hygiene.sh                  # no secrets, databases or local files tracked
+```
 
-## Current limitations before real users
+- Expect **1 skipped** test unless the optional `llvmlite==0.43.0` is installed. That test regenerates the GPU
+  kernel's PTX from source; skipping it says nothing about hardware.
+- CI runs:
+  - the suite on Linux and macOS (Python 3.10, 3.12);
+  - the agent alone on Python 3.8;
+  - the PTX reproducibility check;
+  - fresh-runner bootstrap plus smoke tests;
+  - the hygiene check.
 
-- No NVIDIA hardware or second-network test has run (Tests 2 and 3 in the runbook).
-- No real payments or payouts. No email verification or password reset. Single-process SQLite.
-- Providers' hardware reports are self-attested. GPU execution is cross-checked, not cryptographically proven.
-- Agents run only fixed workload templates; customer code needs sandboxing first (architecture §7).
+## Current limitations
+
+- No NVIDIA GPU or second-network test has run yet (see the notice above).
+- Single-process SQLite. No email verification, password reset or 2FA. Rate limiting is per process.
+- Hardware reports are self-attested by providers. GPU execution is cross-checked, not cryptographically proven.
+- No real payments, payouts or KYC. No hosted service. Do not expose a marketplace publicly without TLS (the
+  server refuses to) and the checklist in [docs/REMOTE_CONNECTIVITY.md](docs/REMOTE_CONNECTIVITY.md).
+
+## Contributing
+
+- **Hardware test reports** are the most useful contribution: run the [runbook](docs/TEST_RUNBOOK.md) on an
+  older NVIDIA card and open an issue with the results template from
+  [docs/HARDWARE_TESTING.md](docs/HARDWARE_TESTING.md). Redact tokens and hostnames.
+- **Issues** for bugs, questions and design feedback are welcome.
+- **Pull requests:** please open an issue first. No open-source licence has been granted yet (see below), so
+  code contributions can't be accepted until the founders choose one.
+- Development rules (tests for every change, migrations, the PTX build, honesty about verification) are in
+  [CLAUDE.md](CLAUDE.md) §9.
+- **Security issues:** please report privately, as described in [SECURITY.md](SECURITY.md).
+
+## Licence
+
+**No licence has been chosen yet.** The packages are marked `Proprietary`, so the code is visible but all
+rights are reserved: you may read it, but not reuse, modify or redistribute it. Choosing a licence is an open
+decision for the founders.
 
 ## Documentation
 
-[CLAUDE.md](CLAUDE.md) (agents' canonical instructions) ·
 [docs/SETUP_NEW_MACHINE.md](docs/SETUP_NEW_MACHINE.md) · [docs/TEST_RUNBOOK.md](docs/TEST_RUNBOOK.md) ·
-[docs/HARDWARE_TESTING.md](docs/HARDWARE_TESTING.md) · [docs/REMOTE_CONNECTIVITY.md](docs/REMOTE_CONNECTIVITY.md) ·
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md) ·
-[PROJECT_BLUEPRINT.md](PROJECT_BLUEPRINT.md)
+[docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md) · [docs/HARDWARE_TESTING.md](docs/HARDWARE_TESTING.md) ·
+[docs/REMOTE_CONNECTIVITY.md](docs/REMOTE_CONNECTIVITY.md) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
+[CLAUDE.md](CLAUDE.md) · [PROJECT_BLUEPRINT.md](PROJECT_BLUEPRINT.md)
+
+Branches: `feature/mvp-integration` (default, current MVP) and `main` (the original v0.1 draft, kept as the
+history baseline).
