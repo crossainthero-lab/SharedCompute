@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharedcompute"
+version = "0.2.0"
+description = "SharedCompute: a marketplace that matches AI compute jobs to independently owned GPUs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "William" }, { name = "Stefan" }]
+dependencies = [
+    "fastapi>=0.110,<1",
+    "uvicorn>=0.29,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+# Optional: richer NVIDIA discovery for the provider agent.
+nvml = ["nvidia-ml-py>=12"]
+
+[tool.setuptools.packages.find]
+where = [".", "agent"]
+include = ["sharedcompute*", "sharedcompute_agent*"]
+
+[tool.setuptools.package-data]
+sharedcompute = ["schema.sql", "web/*", "web/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
