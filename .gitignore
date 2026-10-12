@@ -1,6 +1,32 @@
+# Local databases and runtime data (never commit: contain accounts, sessions and ledger rows)
+data/
 *.sqlite3
+*.sqlite3-*
+*.db
+
+# Secrets: node tokens, env files, keys, wallets
+.env
+.env.*
+*.token
+*.pem
+*.key
+wallet*.json
+keystore/
+
+# Python
 __pycache__/
 *.pyc
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
 
 # Source archive of the v0.1 draft (contents are committed)
 /SharedCompute_MVP_Draft_*.zip
