@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Marketplace + agent (Python ${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: pytest
+
+  agent-py38:
+    # Older provider machines often ship Python 3.8. The agent must install with no dependencies.
+    name: Agent only (Python 3.8)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+      - run: pip install ./agent "pytest<8.4"
+      - run: python -m sharedcompute_agent diagnose
+      - run: pytest -o addopts="" -c /dev/null --rootdir agent agent/tests
+
+  ptx:
+    # The committed PTX must be exactly what LLVM generates from agent/kernels/*.ll.
+    name: PTX is reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "llvmlite==0.43.0"
+      - run: python agent/kernels/build_ptx.py --check
+
+  secrets:
+    name: No secrets or local data committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sh scripts/check-repo-hygiene.sh

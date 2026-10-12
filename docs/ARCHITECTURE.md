@@ -47,19 +47,27 @@ flowchart LR
 | Job lifecycle | `sharedcompute/services/jobs.py` | Built. |
 | Ledger | `sharedcompute/services/ledger.py` | Built, simulated credits only. |
 | Agent protocol (server) | `sharedcompute/services/agent_protocol.py` | Built. |
-| Provider agent | `agent/sharedcompute_agent/` | Proof of concept. Standard library only; NVML and PyTorch optional. |
+| Provider agent | `agent/sharedcompute_agent/` | Proof of concept, separately installable (`agent/pyproject.toml`, Python 3.8+). Standard library only; optional NVML. CUDA via ctypes against the driver. |
 | Web UI | `sharedcompute/web/` | Built. No build step; ES modules; strict CSP. |
 | Artifact storage, container runtime, payments | — | Designed below, not built. |
 
 ## 3. Data model
 
-`schema.sql` is the source of truth. All money is integer US cents.
+`sharedcompute/migrations/NNNN_*.sql` are the source of truth, applied in order on startup and tracked in
+`PRAGMA user_version`. Never edit an applied migration; add the next number. All money is integer US cents.
 
 - **users**: email + PBKDF2 password hash; `is_operator` for platform-wide views; `is_system` for the sample network owner (cannot sign in).
 - **sessions**: SHA-256 of opaque bearer tokens (`scs_…`). The raw token lives only in the client's HttpOnly cookie.
 - **nodes**: one machine. `kind` is `simulated` (self-reported listing, executed by the simulator) or `agent` (runs the agent). Agent nodes hold the SHA-256 of their `scn_…` token, the advertised workload capabilities, `max_concurrency` and `last_seen_at`.
-- **gpus**: one device. Detection source (`self_reported`, `nvml`, `nvidia-smi`, `system_profiler`), hashed hardware UUID, VRAM, CUDA/compute capability, driver, per-GPU price, `enabled` (provider switch), `present` (still reported by the agent) and latest metrics.
-- **jobs**: requirements (workload, min VRAM, estimated minutes, max budget, region), status, the assignment snapshot (GPU, node, provider, hourly rate, quote, fee bps, issued params, lease), and the settlement (billed seconds, cost, provider share, fee, result, verification).
+- **gpus**: one compute device. `device_type` is `gpu` or `cpu` (a CPU device lets CPU-only machines take part).
+  It holds the detection source (`self_reported`, `nvml`, `nvidia-smi`, `cuda`, `system_profiler`, `os`), the
+  hashed hardware UUID, VRAM total and free, `cuda` (the CUDA driver opened it), compute capability, NVIDIA
+  driver and CUDA driver-API versions, `display_active`, and per-device `capabilities` (workloads). It also has:
+  - `offered`: the provider's opt-in on the machine; never scheduled without it;
+  - `enabled`: the dashboard switch;
+  - `present`: still reported by the agent;
+  - the per-device price and the latest metrics.
+- **jobs**: requirements (workload, min VRAM, optional min compute capability, estimated minutes, max budget, region), status, the assignment snapshot (device, node, provider, hourly rate, quote, fee bps, issued params, lease), and the settlement (billed seconds, cost, provider share, fee, result, verification, `executed_on`, `evidence`).
 - **job_events**: append-only timeline; events carry `node_id` so node track records can be derived.
 - **ledger_accounts / ledger_entries / ledger_postings**: double-entry bookkeeping. Every entry's postings sum to zero.
 
@@ -104,11 +112,11 @@ when the provider creates an agent node (or rotates it) and only its hash is sto
 
 | Call | Purpose |
 |---|---|
-| `hello` | Agent version, platform, capabilities, `max_concurrency`, detected GPUs. Upserts GPUs by hashed UUID (or slot). New integrated GPUs start paused. GPUs no longer reported become `present = 0` and their jobs are requeued. Repeated every 10 minutes. |
+| `hello` | Agent version, platform, `max_concurrency` and every detected device. For each device it sends `offered`, `offer_note` and the workloads it believes it can run. Devices are upserted by (type, hashed UUID) or (type, slot). The server keeps only allowlisted workloads matching the device type, and the scheduler re-checks hardware requirements itself. Devices no longer reported, or withdrawn, have their jobs requeued. Repeated every 10 minutes. |
 | `heartbeat` | Every 10 s. Liveness + per-GPU utilisation, memory and temperature. Body lists the job ids the agent is running; the reply lists which to stop (cancelled, timed out or reassigned). |
-| `jobs/claim` | Takes the oldest job assigned to this node: `assigned → running`. Returns the workload id, server-issued params, GPU slot and time limit. |
-| `jobs/{id}/complete` | Submits output. The server verifies it, bills **server-measured** runtime (claim to completion) at the snapshotted rate, capped at the quote, and settles the ledger. The agent's own runtime figure is stored but not trusted. |
-| `jobs/{id}/fail` | Reports an execution failure, with `retryable` to request a requeue. |
+| `jobs/claim` | Takes the oldest job assigned to this node: `assigned → running`. Returns the workload id, server-issued params, the device (type, slot, fingerprint) and the time limit. The agent re-checks the device locally before doing any work. |
+| `jobs/{id}/complete` | Submits output. The server verifies it and records execution evidence (§7a). If both pass, it bills **server-measured** runtime (claim to completion) at the snapshotted rate, capped at the quote, and settles the ledger. The agent's own runtime figure is stored but not trusted. |
+| `jobs/{id}/fail` | Reports an execution failure, with `retryable` to request a requeue. With `code: "incompatible"` it is a graceful rejection: the device stops advertising that workload until the next `hello`, and the job is requeued without using an attempt or counting against the provider. |
 
 The agent (`python -m sharedcompute_agent run`) runs one job at a time in a worker thread, keeps
 heartbeating during execution, enforces the time limit locally, backs off exponentially when the
@@ -117,7 +125,22 @@ retryable failure.
 
 ### Hardware discovery and trust
 
-Detection order: NVML (`nvidia-ml-py`) → `nvidia-smi` CSV → macOS `system_profiler` → nothing.
+Inventory: NVML (`nvidia-ml-py`) → `nvidia-smi` CSV (three query sets, newest first, for old drivers) →
+macOS `system_profiler`. NVIDIA GPUs are then cross-checked with the CUDA driver itself (`cuInit`,
+`cuDriverGetVersion`, compute capability, PCI bus id), matched by **PCI bus id** rather than index. Only GPUs
+the driver opens are marked CUDA-usable. The CPU is reported as its own device.
+
+**Opt-in (`agent/sharedcompute_agent/policy.py`):**
+- No device is offered by default. GPUs need `--gpu INDEX|UUID` and the CPU needs `--offer-cpu`.
+- A GPU with `display_active` is refused unless `--allow-display-gpu` is given, so a provider's main GPU is
+  never used by accident.
+- A selected GPU that cannot run any workload is reported as not offered, with the reason.
+
+**Compatibility.** `agent.cuda_matmul` needs CUDA usable, compute capability ≥ 3.0, a CUDA 5.5+ driver and
+64 MB VRAM. The agent checks this before offering, the server checks it again from the report (`workloads.incompatibilities`), and the
+agent checks free VRAM again at claim time. Mismatches surface as quote explanations, dashboard notes or
+graceful rejections, never as failed jobs.
+
 Trust levels, lowest to highest:
 
 1. **Self-reported listing** (simulated nodes): typed by a person.
@@ -133,9 +156,38 @@ Trust levels, lowest to highest:
 | Path | Runs where | Verified | Status |
 |---|---|---|---|
 | Simulated workloads (`sim.*`) | Nowhere; the server times them | No | Built, for testing the product |
-| `agent.hashchain` | Provider CPU | Yes, recomputed by the server | Built, verified end to end on a real machine |
-| `agent.matmul` | Provider GPU via PyTorch CUDA | Exact checksum `sum(A·B) = colsum(A)·rowsum(B)` | Implemented; **not yet executed on NVIDIA hardware** |
+| `agent.hashchain` | Provider CPU (a `cpu` device) | Yes, recomputed by the server | Built, verified end to end on a real machine |
+| `agent.cuda_matmul` | Provider NVIDIA GPU via the CUDA driver API (ctypes) and PTX JIT | Exact checksum plus Merkle-committed result with challenged rows recomputed by the server | Built; tested with a fake driver; **not yet executed on NVIDIA hardware** |
 | Customer containers | Provider GPU in a sandbox | Template-specific | Designed, not built |
+
+### 7a. The GPU kernel and execution evidence
+
+The kernel (`agent/kernels/matmul_i32.ll`) is LLVM IR compiled to PTX by LLVM's NVPTX backend
+(`build_ptx.py`, reproducible in CI). The target is `sm_30` with PTX ISA 3.2, so the driver JIT-compiles the
+same file for Kepler through current GPUs, and no CUDA toolkit is needed on providers. The workload multiplies
+two seeded 256×256 int32 matrices (entries in [−8, 8], so int32 never overflows and results are exact on every
+GPU), times `repeats` launches with CUDA events, and returns:
+
+- `checksum = sum(C)`, which the server checks in O(n²) via `colsum(A)·rowsum(B)`;
+- a Merkle root over all rows of C, and `samples` challenged rows with proofs. The rows are derived from
+  `sha256(root ‖ server nonce)`, so they cannot be chosen before the whole result is committed. The server
+  recomputes each challenged row exactly and checks its proof. A fabricated C that only satisfies the
+  checksum fails.
+
+The server then records where the job ran (`jobs.executed_on`, `jobs.evidence`):
+
+| Level | Meaning | Billed |
+|---|---|---|
+| `gpu_attested` | Result verified. The agent reports GPU execution through `cuda-driver-ptx`. The reported device fingerprint and compute capability match the assigned GPU. Kernel time × repeats fits inside the server-observed window. | Yes |
+| `cpu_fallback` | Result verified, but the agent reports CPU execution (only possible with `--allow-cpu-fallback`) | **No**: GPU workload |
+| `inconsistent` | Identity or timing contradicts the assigned device | No |
+| `failed_verification` | Wrong result | No |
+| `cpu_verified` | CPU workload with a verified result | Yes |
+| `simulated` | Simulator; nothing executed | Simulated credits |
+
+`gpu_attested` is deliberately not called "proven". A modified agent could compute the matrix on a CPU and
+claim otherwise. Proof of GPU execution would need benchmarked timing envelopes per GPU model, and
+ultimately hardware attestation (§6).
 
 ### Designed: running real customer workloads safely
 
@@ -195,10 +247,14 @@ Built:
 - Input validation on every field, 64 KB body limit, login and registration rate limits (in-process).
 - Agents can only advertise allowlisted workloads, only act on their own node's jobs, and cannot set their
   own billable time.
+- Transport: agents refuse plain HTTP to non-loopback hosts and verify TLS (system store or `--ca-file`,
+  TLS ≥ 1.2). `serve` refuses non-loopback binds without TLS or `--behind-tls-proxy`. Exposed servers mark
+  cookies Secure, close self-registration, require sign-in for the marketplace and hide the API docs. See
+  [REMOTE_CONNECTIVITY.md](REMOTE_CONNECTIVITY.md).
 
 Not built (required before untrusted users):
 
-- TLS termination and HTTPS-only deployment; email verification, password reset, 2FA for operators.
+- Email verification, password reset, 2FA for operators; mutual TLS or token binding for agents.
 - Distributed rate limiting, audit logging, alerting, abuse reporting.
 - Self-dealing controls: `SHAREDCOMPUTE_ALLOW_SELF_MATCH=0` once money is real.
 - Signed agent releases and auto-update; mTLS or token-bound connections for agents.
@@ -216,8 +272,8 @@ Not built (required before untrusted users):
 
 ## 11. Milestones toward real GPU execution
 
-1. **NVIDIA validation.** Run the agent on one Linux + NVIDIA machine: confirm NVML detection and metrics, run
-   `agent.matmul`, and check the verified checksum and reported TFLOPS against the card's spec.
+1. **NVIDIA validation** ([HARDWARE_TESTING.md](HARDWARE_TESTING.md)). Run `diagnose --selftest` on one
+   Linux machine with an older NVIDIA card, then a marketplace `agent.cuda_matmul` job reaching `gpu_attested`.
 2. **Two-host pilot.** Two separately owned NVIDIA machines on different home networks connect to a
    TLS-fronted marketplace; jobs match, run, verify and settle; one host is unplugged mid-job and the job
    completes on the other.
