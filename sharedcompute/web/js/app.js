@@ -45,9 +45,10 @@ function initials(name) {
 function renderAccount() {
   const el = document.getElementById('account');
   if (!store.user) {
+    const open = store.meta?.registration_open !== false;
     el.innerHTML = String(html`
-      <button class="btn btn-ghost btn-sm" data-auth="login">Sign in</button>
-      <button class="btn btn-primary btn-sm" data-auth="register">Create account</button>`);
+      <button class="btn ${open ? 'btn-ghost' : 'btn-primary'} btn-sm" data-auth="login">Sign in</button>
+      ${open ? html`<button class="btn btn-primary btn-sm" data-auth="register">Create account</button>` : ''}`);
     return;
   }
   const b = store.balances || { available_cents: 0 };
@@ -109,7 +110,7 @@ export function requireAuth(ctx, title, body) {
       <h1>${title}</h1>
       <p>${body}</p>
       <div class="btn-row" data-center>
-        <button class="btn btn-primary" data-auth="register">Create account</button>
+        ${store.meta?.registration_open !== false ? html`<button class="btn btn-primary" data-auth="register">Create account</button>` : ''}
         <button class="btn" data-auth="login">Sign in</button>
       </div>
     </div>`);

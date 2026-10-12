@@ -54,11 +54,16 @@ function tokenHtml(server) {
         <div class="btn-row"><code class="inline-code mono" id="token-value">${issuedToken.token}</code>
           <button class="btn btn-sm" data-act="copy-token">Copy</button>
           <button class="btn btn-sm btn-ghost" data-act="dismiss-token">I've saved it</button></div>
-        <pre class="code">${`# On the GPU machine, from a checkout of this repository:
-python3 -m venv .venv && . .venv/bin/activate && pip install -e .
-python -m sharedcompute_agent detect          # check what the agent will report
-export SHAREDCOMPUTE_NODE_TOKEN='${issuedToken.token}'
-python -m sharedcompute_agent run --server ${server}`}</pre>
+        <pre class="code">${`# On the provider machine (Python 3.8+, NVIDIA driver for GPU work; no CUDA toolkit needed):
+python3 -m venv ~/sc-agent && . ~/sc-agent/bin/activate
+pip install ./agent                       # from a checkout of this repository
+python -m sharedcompute_agent diagnose    # what will be reported; nothing is offered yet
+python -m sharedcompute_agent diagnose --gpu 0 --selftest   # run the real kernel on GPU 0
+
+umask 077; printf '%s' '${issuedToken.token}' > ~/.sharedcompute-node-token
+python -m sharedcompute_agent run --server ${server} \\
+  --token-file ~/.sharedcompute-node-token --gpu 0      # add --offer-cpu to also offer the CPU`}</pre>
+        <p class="faint small-print">Remote machines must use an https:// server URL (add --ca-file for a private CA). Nothing is used unless you pass --gpu or --offer-cpu; a GPU that drives a display also needs --allow-display-gpu. See docs/HARDWARE_TESTING.md.</p>
       </div>
     </div>`;
 }
@@ -72,21 +77,37 @@ function nodeStatus(n) {
 
 function gpuRow(n, g) {
   const m = g.metrics;
+  if (g.device_type === 'cpu') {
+    return html`
+    <tr>
+      <td class="cell-main"><div class="primary">${g.model} <span class="tag">CPU</span></div><div class="sub">${g.workloads.join(', ') || 'no workloads'}</div>
+        ${g.offered ? '' : html`<div class="sub">${g.offer_note || 'Not offered on the machine'}</div>`}</td>
+      <td data-label="VRAM" class="num faint">—</td>
+      <td data-label="Status">${ui.status(g.status)}</td>
+      <td data-label="Price" class="r">${priceForm(g)}</td>
+      <td data-label="Listed" class="r"><input class="switch" type="checkbox" role="switch" data-gpu-toggle="${g.id}" ${g.enabled ? 'checked' : ''} ${g.offered ? '' : 'disabled'} aria-label="List ${g.model}"></td>
+    </tr>`;
+  }
   const specs = [ui.DETECTION[g.detection] || g.detection, g.cuda ? `CUDA${g.compute_capability ? ` ${g.compute_capability}` : ''}` : (n.kind === 'agent' ? 'no CUDA' : null),
-    g.driver_version ? `driver ${g.driver_version}` : null, g.integrated ? 'integrated' : null].filter(Boolean).join(' · ');
+    g.driver_version ? `driver ${g.driver_version}` : null, ui.cudaVersion(g.cuda_driver_version) ? `CUDA ${ui.cudaVersion(g.cuda_driver_version)}` : null,
+    g.vram_free_mb !== null ? `${g.vram_free_mb} MB free` : null, g.display_active ? 'drives a display' : null,
+    g.integrated ? 'integrated' : null].filter(Boolean).join(' · ');
   return html`
     <tr>
-      <td class="cell-main"><div class="primary">${g.model}</div><div class="sub">${g.vendor} · ${specs}</div></td>
+      <td class="cell-main"><div class="primary">${g.model}</div><div class="sub">${g.vendor} · ${specs}</div>
+        <div class="sub">${g.offered ? (g.workloads.length ? `Runs: ${g.workloads.join(', ')}` : 'Offered, but no compatible workload') : (g.offer_note || 'Not offered on the machine')}</div></td>
       <td data-label="VRAM" class="num">${ui.gb(g.vram_gb)}</td>
       <td data-label="Status">${ui.status(g.status)}${m && m.util_percent !== null ? html`<div class="sub">${Math.round(m.util_percent)}% util · ${m.temperature_c !== null ? `${Math.round(m.temperature_c)}°C` : ''}</div>` : ''}</td>
-      <td data-label="Price" class="r">
-        <form class="price-edit" data-gpu-price="${g.id}">
-          <div class="input-affix"><span>$</span><input class="input num" name="hourly_usd" type="number" min="0.01" max="100" step="0.01" value="${(g.hourly_cents / 100).toFixed(2)}" aria-label="Price per GPU-hour for ${g.model}"></div>
-          <button class="btn btn-sm" type="submit">Save</button>
-        </form>
-      </td>
-      <td data-label="Listed" class="r"><input class="switch" type="checkbox" role="switch" data-gpu-toggle="${g.id}" ${g.enabled ? 'checked' : ''} aria-label="List ${g.model}"></td>
+      <td data-label="Price" class="r">${priceForm(g)}</td>
+      <td data-label="Listed" class="r"><input class="switch" type="checkbox" role="switch" data-gpu-toggle="${g.id}" ${g.enabled ? 'checked' : ''} ${g.offered ? '' : ui.raw('disabled title="Offer it on the machine first (agent flags)"')} aria-label="List ${g.model}"></td>
     </tr>`;
+}
+
+function priceForm(g) {
+  return html`<form class="price-edit" data-gpu-price="${g.id}">
+    <div class="input-affix"><span>$</span><input class="input num" name="hourly_usd" type="number" min="0.01" max="100" step="0.01" value="${(g.hourly_cents / 100).toFixed(2)}" aria-label="Price per hour for ${g.model}"></div>
+    <button class="btn btn-sm" type="submit">Save</button>
+  </form>`;
 }
 
 function nodeHtml(n) {
@@ -107,9 +128,9 @@ function nodeHtml(n) {
         </div>
       </div>
       ${n.gpus.length ? html`<div class="table-wrap"><table class="table stackable">
-        <thead><tr><th>GPU</th><th>VRAM</th><th>Status</th><th class="r">Price / GPU-hour</th><th class="r">Listed</th></tr></thead>
+        <thead><tr><th>Device</th><th>VRAM</th><th>Status</th><th class="r">Price / hour</th><th class="r">Listed</th></tr></thead>
         <tbody>${n.gpus.map((g) => gpuRow(n, g))}</tbody></table></div>`
-        : html`<div class="table-empty">No GPUs reported yet. Start the agent with this node's token.</div>`}
+        : html`<div class="table-empty">No devices reported yet. Start the agent with this node's token.</div>`}
     </div>`;
 }
 
@@ -122,8 +143,8 @@ function statsHtml() {
   return html`<div class="stats">
     <div class="stat"><div class="label">Earned</div><div class="value">${ui.usd(earned)}</div><div class="sub">Simulated credits · no payouts yet</div></div>
     <div class="stat"><div class="label">Completed jobs</div><div class="value">${jobs}</div><div class="sub">on your hardware</div></div>
-    <div class="stat"><div class="label">GPU time billed</div><div class="value">${ui.hours(seconds)}</div><div class="sub">simulated + measured</div></div>
-    <div class="stat"><div class="label">GPUs accepting jobs</div><div class="value">${live}<span class="faint"> / ${gpus.length}</span></div><div class="sub">${ui.plural(nodes.length, 'node')}</div></div>
+    <div class="stat"><div class="label">Compute time billed</div><div class="value">${ui.hours(seconds)}</div><div class="sub">simulated + measured</div></div>
+    <div class="stat"><div class="label">Devices accepting jobs</div><div class="value">${live}<span class="faint"> / ${gpus.length}</span></div><div class="sub">${ui.plural(nodes.length, 'node')}</div></div>
   </div>`;
 }
 

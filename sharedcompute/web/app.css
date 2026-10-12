@@ -184,6 +184,7 @@ button, input, select { font: inherit; color: inherit; }
   background: #fff; transition: transform 0.15s; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); }
 .switch:checked { background: var(--ok); }
 .switch:checked::after { transform: translateX(14px); }
+.switch:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .toolbar .select { width: auto; height: 32px; font-size: 13px; }
@@ -373,3 +374,5 @@ pre.code { margin: 8px 0 0; padding: 12px 14px; background: var(--text); color: 
 .empty-actions { justify-content: center; margin-top: 14px; }
 .gate .btn-row { justify-content: center; }
 .split .card .section-head { margin-bottom: 0; }
+ul.evidence { list-style: none; padding: 0; margin: 8px 0; font-size: 12.5px; color: var(--text-2); }
+ul.evidence li { padding: 1px 0; }

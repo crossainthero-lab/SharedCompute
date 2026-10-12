@@ -19,8 +19,8 @@ function visible(gpus) {
 function statsHtml(s) {
   return html`
     <div class="stats cols-5">
-      <div class="stat"><div class="label">Listed GPUs</div><div class="value">${s.listed}</div>
-        <div class="sub">${s.simulated} simulated</div></div>
+      <div class="stat"><div class="label">Listed devices</div><div class="value">${s.listed}</div>
+        <div class="sub">${ui.plural(s.listed_gpus, 'GPU')}${s.listed_cpus ? ` · ${ui.plural(s.listed_cpus, 'CPU')}` : ''} · ${s.simulated} simulated</div></div>
       <div class="stat"><div class="label">Available now</div><div class="value">${s.available}</div>
         <div class="sub">${s.busy} busy</div></div>
       <div class="stat"><div class="label">Agent-connected</div><div class="value">${s.agent_connected}</div>
@@ -34,21 +34,22 @@ function statsHtml(s) {
 
 function useLink(g) {
   const workload = g.workloads[0] || 'sim.image';
-  const vram = Math.max(1, Math.floor(g.vram_gb));
+  const vram = g.device_type === 'cpu' ? 0 : Math.max(1, Math.floor(g.vram_gb));
   return `#/jobs?workload=${encodeURIComponent(workload)}&vram=${vram}&region=${encodeURIComponent(g.region)}`;
 }
 
 function gpuRow(g) {
-  const noCuda = g.execution === 'agent' && !g.cuda;
+  const noCuda = g.execution === 'agent' && g.device_type === 'gpu' && !g.cuda;
+  const isCpu = g.device_type === 'cpu';
   const metrics = g.metrics && g.metrics.util_percent !== null
     ? html` · ${Math.round(g.metrics.util_percent)}% util${g.metrics.temperature_c !== null ? html` · ${Math.round(g.metrics.temperature_c)}°C` : ''}` : '';
   return html`
     <tr>
       <td class="cell-main">
-        <div class="primary">${g.model} ${ui.sourceTag(g.execution)} ${noCuda ? html`<span class="tag" title="Not an NVIDIA CUDA device">NO CUDA</span>` : ''}</div>
-        <div class="sub">${g.vendor} · ${ui.DETECTION[g.detection] || g.detection} · ${g.node.name}${metrics}</div>
+        <div class="primary">${g.model} ${ui.sourceTag(g.execution)} ${isCpu ? html`<span class="tag">CPU</span>` : ''} ${noCuda ? html`<span class="tag" title="Not an NVIDIA CUDA device">NO CUDA</span>` : ''}</div>
+        <div class="sub">${g.vendor}${g.compute_capability ? ` · CC ${g.compute_capability}` : ''}${ui.cudaVersion(g.cuda_driver_version) ? ` · CUDA ${ui.cudaVersion(g.cuda_driver_version)}` : ''} · ${ui.DETECTION[g.detection] || g.detection} · ${g.node.name}${metrics}</div>
       </td>
-      <td data-label="VRAM" class="num">${ui.gb(g.vram_gb)}</td>
+      <td data-label="VRAM" class="num">${isCpu ? html`<span class="faint">—</span>` : ui.gb(g.vram_gb)}</td>
       <td data-label="Region">${g.region_label}</td>
       <td data-label="Price" class="r num nowrap"><b>${ui.usd(g.hourly_cents)}</b><span class="faint">/hr</span></td>
       <td data-label="Status">${ui.status(g.status)}</td>
@@ -89,6 +90,11 @@ async function refresh(ctx) {
     data = await api.get('/marketplace');
     render(ctx);
   } catch (err) {
+    if (err.status === 401) {
+      ui.patch(ctx.root.querySelector('#mk-table'), ui.empty('Sign in to browse this marketplace',
+        html`<div>This deployment is private. Ask an operator for an account.</div>`, html`<button class="btn btn-sm btn-primary" data-auth="login">Sign in</button>`));
+      return;
+    }
     ui.patch(ctx.root.querySelector('#mk-table'), ui.empty('Could not load the marketplace', html`<div>${err.message}</div>`));
   }
 }

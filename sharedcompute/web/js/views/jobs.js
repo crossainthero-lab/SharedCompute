@@ -4,7 +4,8 @@ import * as ui from '../ui.js';
 import { html } from '../ui.js';
 
 const STATUSES = ['pending', 'assigned', 'running', 'completed', 'failed', 'cancelled'];
-const VRAM = [1, 4, 8, 12, 16, 24, 32, 48, 80];
+const VRAM = [0, 1, 2, 4, 8, 12, 16, 24, 32, 48, 80];
+const CC = ['3.0', '3.5', '5.0', '5.2', '6.0', '6.1', '7.0', '7.5', '8.0', '8.6', '8.9', '9.0'];
 let filter = 'all';
 let openJob = null;
 let detailCache = { id: null, html: '' };
@@ -22,7 +23,7 @@ function formHtml(ctx) {
   const p = ctx.params;
   const meta = ctx.store.meta;
   const workload = meta.workloads.some((w) => w.id === p.get('workload')) ? p.get('workload') : 'sim.image';
-  const vram = Number(p.get('vram')) || 12;
+  const vram = p.has('vram') ? Number(p.get('vram')) : (workload.startsWith('agent.') ? 0 : 12);
   const region = p.get('region') || 'any';
   const vramChoices = VRAM.includes(vram) ? VRAM : [...VRAM, vram].sort((a, b) => a - b);
   return html`
@@ -34,7 +35,9 @@ function formHtml(ctx) {
         <select class="select" id="j-workload" name="workload">${workloadOptions(meta, workload)}</select>
         <span class="hint" id="j-workload-hint"></span></div>
       <div class="field"><label for="j-vram">Minimum VRAM</label>
-        <select class="select" id="j-vram" name="min_vram_gb">${vramChoices.map((v) => html`<option value="${v}" ${v === vram ? 'selected' : ''}>${v} GB</option>`)}</select></div>
+        <select class="select" id="j-vram" name="min_vram_gb">${vramChoices.map((v) => html`<option value="${v}" ${v === vram ? 'selected' : ''}>${v ? `${v} GB` : 'No minimum'}</option>`)}</select></div>
+      <div class="field"><label for="j-cc">Min. compute capability</label>
+        <select class="select" id="j-cc" name="min_compute_capability"><option value="">Any GPU</option>${CC.map((c) => html`<option value="${c}">${c}+</option>`)}</select></div>
       <div class="field"><label for="j-minutes">Estimated GPU-minutes</label>
         <input class="input num" id="j-minutes" name="est_minutes" type="number" min="1" max="10080" step="1" value="${workload.startsWith('agent.') ? 2 : 45}" required></div>
       <div class="field"><label for="j-budget">Maximum budget</label>
@@ -59,7 +62,7 @@ function quoteHtml(q, budgetCents, feeBps) {
     const m = q.match;
     const provider = Math.round(m.quote_cents * (10000 - feeBps) / 10000);
     lines = html`<div class="q-lines num">
-      <span>GPU</span><span>${m.model} · ${ui.gb(m.vram_gb)} · ${m.region_label} ${ui.sourceTag(m.execution)}</span>
+      <span>${m.device_type === 'cpu' ? 'CPU' : 'GPU'}</span><span>${m.model}${m.device_type === 'cpu' ? '' : ` · ${ui.gb(m.vram_gb)}`}${m.compute_capability ? ` · CC ${m.compute_capability}` : ''} · ${m.region_label} ${ui.sourceTag(m.execution)}</span>
       <span>Rate</span><span>${ui.rate(m.hourly_cents)}</span>
       <span>Quote</span><span><b>${ui.usd(m.quote_cents)}</b> of ${ui.usd(budgetCents)} budget</span>
       <span>Split</span><span>${ui.usd(provider)} provider · ${ui.usd(m.quote_cents - provider)} fee</span></div>`;
@@ -87,7 +90,8 @@ async function updateQuote(ctx) {
   const box = ctx.root.querySelector('#j-quote');
   try {
     const q = await api.post('/quotes', { workload: data.workload, min_vram_gb: Number(data.min_vram_gb),
-      est_minutes: Number(data.est_minutes), max_budget_usd: data.max_budget_usd, region: data.region });
+      est_minutes: Number(data.est_minutes), max_budget_usd: data.max_budget_usd, region: data.region,
+      min_compute_capability: data.min_compute_capability || null });
     if (seq !== quoteSeq) return;
     box.className = `quote ${q.outcome}`;
     box.innerHTML = String(quoteHtml(q, budget, meta.platform_fee_bps));
@@ -117,9 +121,9 @@ function jobRow(j) {
       <td data-label="Status">${ui.status(j.status)}</td>
       <td class="cell-main">
         <div class="primary">${j.name}</div>
-        <div class="sub">#${j.id} · ${j.workload_label} · ${j.min_vram_gb} GB+ · ${j.est_minutes} min est.</div>
+        <div class="sub">#${j.id} · ${j.workload_label}${j.min_vram_gb ? ` · ${j.min_vram_gb} GB+` : ''}${j.min_compute_capability ? ` · CC ${j.min_compute_capability}+` : ''} · ${j.est_minutes} min est. ${ui.evidenceLabel(j) || ''}</div>
       </td>
-      <td data-label="GPU">${j.gpu ? html`${j.gpu.model} ${ui.sourceTag(j.gpu.node_kind)}<div class="sub">${j.gpu.region_label}</div>` : html`<span class="faint">${['failed', 'cancelled'].includes(j.status) ? '—' : 'Waiting for a match'}</span>`}</td>
+      <td data-label="Device">${j.gpu ? html`${j.gpu.model} ${ui.sourceTag(j.gpu.node_kind)}<div class="sub">${j.gpu.region_label}</div>` : html`<span class="faint">${['failed', 'cancelled'].includes(j.status) ? '—' : 'Waiting for a match'}</span>`}</td>
       <td data-label="Cost" class="r num nowrap">${costCell(j)}</td>
       <td data-label="Updated" class="r faint nowrap">${ui.ago(when)}</td>
     </tr>
@@ -128,18 +132,31 @@ function jobRow(j) {
 
 function resultHtml(j) {
   if (j.status === 'failed') {
-    return html`<div class="result"><b class="neg">Failed.</b> ${j.failure_reason || ''}${j.result?.verification ? html`<div class="faint">${j.result.verification}</div>` : ''}<div class="faint">Nothing was charged; the hold was released.</div></div>`;
+    return html`<div class="result"><b class="neg">Failed.</b> ${j.failure_reason || ''}${j.result?.verification ? html`<div class="faint">${j.result.verification}</div>` : ''}<div class="faint">Nothing was charged; the hold was released.</div>${j.evidence && j.evidence.level !== 'simulated' ? evidenceHtml(j) : ''}</div>`;
   }
   if (!j.result) return '';
   if (j.result.simulated) return html`<div class="result"><span class="tag tag-sim">SIM</span> ${j.result.note}</div>`;
-  const out = j.result.output || {};
-  return html`<div class="result">
-    <div>${j.verified ? html`<span class="tag tag-ok">VERIFIED</span>` : html`<span class="tag tag-bad">UNVERIFIED</span>`} ${j.result.verification}</div>
+  return html`<div class="result">${evidenceHtml(j)}</div>`;
+}
+
+function evidenceHtml(j) {
+  const ev = j.evidence || {};
+  const out = j.result?.output || {};
+  const dev = out.device || {};
+  const check = (ok, text) => html`<li>${ok === true ? '✓' : ok === false ? '✗' : '–'} ${text}</li>`;
+  const timing = ev.timing || {};
+  return html`
+    <div>${ui.evidenceLabel(j) || ''} ${j.result?.verification || ''}</div>
+    <ul class="evidence">
+      ${check(ev.result_verified, 'Result recomputed or spot-checked by the server')}
+      ${check(ev.claimed_device === (j.workload === 'agent.hashchain' ? 'cpu' : 'gpu'), `Agent reports ${String(ev.claimed_device || 'unknown').toUpperCase()} execution${dev.backend ? ` (${dev.backend})` : ''}`)}
+      ${ev.device_identity ? check(Object.values(ev.device_identity).every(Boolean), 'Reported device matches the assigned GPU (fingerprint, compute capability)') : ''}
+      ${ev.timing ? check(timing.consistent, `Kernel time ${timing.kernel_ms ?? '?'} ms × ${timing.repeats} fits the ${timing.server_observed_seconds} s the server observed`) : ''}
+    </ul>
+    ${dev.fallback_reason ? html`<div class="faint">CPU fallback because: ${dev.fallback_reason}</div>` : ''}
     ${out.digest ? html`<div class="faint">Digest <code>${out.digest}</code></div>` : ''}
-    ${out.checksum !== undefined ? html`<div class="faint">Checksum <code>${out.checksum}</code></div>` : ''}
-    ${out.tflops !== undefined ? html`<div class="faint">${out.device} · ${out.tflops} TFLOPS (provider-reported, not verified)</div>` : ''}
-    ${out.device && out.tflops === undefined ? html`<div class="faint">Executed on: ${out.device}</div>` : ''}
-  </div>`;
+    ${out.merkle_root ? html`<div class="faint">Result commitment <code>${out.merkle_root}</code></div>` : ''}
+    ${ev.note ? html`<div class="faint">${ev.note}</div>` : ''}`;
 }
 
 function detailHtml(j) {
@@ -180,7 +197,7 @@ function queueHtml() {
       filter === 'all' ? html`<div>Submit a job to see matching, queueing and billing in action.</div>` : '');
   }
   return html`<div class="table-wrap"><table class="table stackable">
-    <thead><tr><th>Status</th><th>Job</th><th>GPU</th><th class="r">Cost</th><th class="r">Updated</th></tr></thead>
+    <thead><tr><th>Status</th><th>Job</th><th>Device</th><th class="r">Cost</th><th class="r">Updated</th></tr></thead>
     <tbody>${rows.map(jobRow)}</tbody></table></div>`;
 }
 

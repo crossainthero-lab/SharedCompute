@@ -80,7 +80,7 @@ export const plural = (n, word, many = `${word}s`) => `${n.toLocaleString()} ${n
 const STATUS_LABEL = {
   available: 'Available', busy: 'Busy', paused: 'Paused', offline: 'Offline',
   pending: 'Pending', assigned: 'Assigned', running: 'Running', completed: 'Completed',
-  failed: 'Failed', cancelled: 'Cancelled', online: 'Online',
+  failed: 'Failed', cancelled: 'Cancelled', online: 'Online', not_offered: 'Not offered',
 };
 export const status = (s, label) => html`<span class="status ${s}">${label || STATUS_LABEL[s] || s}</span>`;
 
@@ -89,8 +89,27 @@ export const sourceTag = (execution) => (execution === 'agent'
   : html`<span class="tag tag-sim" title="Simulated listing: self-reported, executed by the server's simulator">SIM</span>`);
 
 export const DETECTION = {
-  nvml: 'NVML', 'nvidia-smi': 'nvidia-smi', system_profiler: 'macOS report', lspci: 'lspci', self_reported: 'Self-reported',
+  nvml: 'NVML', 'nvidia-smi': 'nvidia-smi', cuda: 'CUDA driver', system_profiler: 'macOS report', lspci: 'lspci',
+  os: 'OS report', self_reported: 'Self-reported',
 };
+
+export const cudaVersion = (v) => (v ? `${Math.floor(v / 1000)}.${Math.floor((v % 1000) / 10)}` : null);
+
+// Where a job really ran, as far as the server could check.
+export function evidenceLabel(job) {
+  const ev = job.evidence;
+  if (!ev) return null;
+  const labels = {
+    simulated: ['tag-sim', 'SIMULATED', 'Nothing executed'],
+    cpu_verified: ['tag-ok', 'CPU · VERIFIED', 'Ran on the provider CPU; result recomputed by the server'],
+    gpu_attested: ['tag-ok', 'GPU · VERIFIED RESULT', 'Result verified; GPU execution attested by the agent and cross-checked'],
+    cpu_fallback: ['tag-bad', 'CPU FALLBACK', 'Ran on the CPU, not the GPU; not billed'],
+    inconsistent: ['tag-bad', 'INCONSISTENT', 'Evidence did not match the assigned device; not billed'],
+    failed_verification: ['tag-bad', 'FAILED VERIFICATION', 'Result was wrong; not billed'],
+  };
+  const [cls, text, title] = labels[ev.level] || ['', ev.level, ''];
+  return html`<span class="tag ${cls}" title="${title}">${text}</span>`;
+}
 
 export function reliability(r) {
   if (!r || r.score === null || r.score === undefined) {
