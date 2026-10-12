@@ -68,11 +68,9 @@ jobs:
       - run: .venv/bin/python scripts/smoke_local.py --report smoke.json
       - run: scripts/bootstrap-agent.sh --venv "$RUNNER_TEMP/agent-venv" --config-dir "$RUNNER_TEMP/sc-config"
       - run: scripts/doctor.sh --agent-venv "$RUNNER_TEMP/agent-venv" --config-dir "$RUNNER_TEMP/sc-config"
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test evidence (printed, not uploaded; artifact storage is not needed)
         if: always()
-        with:
-          name: smoke-${{ matrix.os }}
-          path: smoke.json
+        run: cat smoke.json || true
 
   secrets:
     name: No secrets or local data committed
